@@ -166,6 +166,30 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
         }
       }
 
+      // Normalize enum fields — DB may store lowercase/variant casing
+      const SERVICE_VALUES = [
+        'Visa Schengen', 'Visa USA', 'Visa UK', 'Résidence',
+        'Visa Dubai', 'Pack Dubai', 'Visa Qatar', 'Pack Qatar',
+        'Visa Roumanie', 'Visa Oman', 'Visa KSA', 'Visa Koweit',
+        'Visa Egypte', 'Visa Chine', 'Visa Canada', 'Visa Grece',
+        'Visa Italie Touristique', 'Visa Italie 1 an', 'Autres',
+      ];
+      const STATUS_VALUES = ['Nouveau', 'En cours', 'Complété', 'Refusé', 'Annulé'];
+      const MARITAL_VALUES = ['Célibataire', 'Marié(e)', 'Divorcé(e)', 'Veuf/Veuve'];
+      const PAYMENT_METHOD_VALUES = ['Espèces', 'Virement', 'Chèque', 'Carte'];
+
+      const normalize = (value: string, options: string[]) =>
+        options.find(o => o.toLowerCase() === value?.toLowerCase()) ?? value;
+
+      if (formattedData.service)
+        formattedData.service = normalize(formattedData.service, SERVICE_VALUES);
+      if (formattedData.status)
+        formattedData.status = normalize(formattedData.status, STATUS_VALUES);
+      if (formattedData.marital_status)
+        formattedData.marital_status = normalize(formattedData.marital_status, MARITAL_VALUES);
+      if (formattedData.payment_method)
+        formattedData.payment_method = normalize(formattedData.payment_method, PAYMENT_METHOD_VALUES);
+
       reset(formattedData);
     }
   }, [initialData, reset]);
