@@ -111,10 +111,17 @@ export const DocumentsTab = ({ clientId }: { clientId: string }) => {
   const deleteDocument = async (id: string) => {
     if (!confirm('Êtes-vous sûr de vouloir supprimer ce document ?')) return;
 
+    // Optimistically remove from UI immediately
+    queryClient.setQueryData(['documents', clientId], (old: any[]) =>
+      old ? old.filter((doc) => doc.id !== id) : []
+    );
+
     const { error } = await supabase.from('documents').delete().eq('id', id);
-    if (error) toast.error(error.message);
-    else {
+    if (error) {
+      // Rollback optimistic update on failure
       queryClient.invalidateQueries({ queryKey: ['documents', clientId] });
+      toast.error(error.message);
+    } else {
       toast.success('Document supprimé');
     }
   };

@@ -27,6 +27,22 @@ interface ClientFormProps {
   clientId?: string;
 }
 
+// Maps form-side labels to the CHECK constraint values in the DB documents table.
+// DB constraint: 'Passeport'|'CIN'|'Photo'|'Acte de naissance'|'Fiche familiale'|
+//                'Justificatif bancaire'|'Assurance'|'Réservation vol'|'Autre'
+const DOC_TYPE_MAP: Record<string, string> = {
+  'CIN': 'CIN',
+  'Passeport': 'Passeport',
+  'Photo Client': 'Photo',
+  'Diplôme': 'Autre',
+  'B3': 'Autre',
+  'Permis': 'Autre',
+  'Contrat Municipalité': 'Autre',
+  'Reçu Paiement Billet': 'Justificatif bancaire',
+  'Reçu Manuscrit': 'Autre',
+  'Justificatif Paiement': 'Justificatif bancaire',
+};
+
 const uploadDocumentsForClient = async (
   clientId: string,
   cinFiles: File[],
@@ -40,71 +56,61 @@ const uploadDocumentsForClient = async (
   handwrittenReceiptFiles: File[],
   paymentProofFiles: File[],
   uploadedBy: string | undefined
-) => {
+): Promise<string | null> => {
   const uploadFile = async (file: File, folder: string): Promise<string | null> => {
     const ext = file.name.split('.').pop() || 'bin';
+    // upsert:true prevents "already exists" errors on retry
     const path = `${clientId}/${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
 
-    // Corrected bucket name to 'client-documents' as per SQL schema
     const { error } = await supabase.storage
       .from('client-documents')
-      .upload(path, file, { upsert: false });
+      .upload(path, file, { upsert: true });
 
     if (error) {
-      console.error('Upload error:', error.message);
+      console.error(`Storage upload failed [${folder}/${file.name}]:`, error.message);
+      toast.error(`Upload échoué (${file.name}): ${error.message}`);
       return null;
     }
     const { data: { publicUrl } } = supabase.storage.from('client-documents').getPublicUrl(path);
     return publicUrl;
   };
 
-  const rows: { client_id: string; document_type: string; file_url: string; file_name: string; uploaded_by?: string; status: string }[] = [];
+  const addRows = async (files: File[], folder: string, labelType: string, rows: any[]) => {
+    const dbType = DOC_TYPE_MAP[labelType] ?? 'Autre';
+    for (const file of files) {
+      const url = await uploadFile(file, folder);
+      if (url) rows.push({
+        client_id: clientId,
+        document_type: dbType,
+        file_url: url,
+        // Prefix original type into filename so it shows clearly in DocumentsTab
+        file_name: `[${labelType}] ${file.name}`,
+        uploaded_by: uploadedBy,
+        status: 'Présent',
+      });
+    }
+  };
 
-  for (const file of cinFiles) {
-    const url = await uploadFile(file, 'cin');
-    if (url) rows.push({ client_id: clientId, document_type: 'CIN', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of passportFiles) {
-    const url = await uploadFile(file, 'passeport');
-    if (url) rows.push({ client_id: clientId, document_type: 'Passeport', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of diplomeFiles) {
-    const url = await uploadFile(file, 'diplome');
-    if (url) rows.push({ client_id: clientId, document_type: 'Diplôme', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of b3Files) {
-    const url = await uploadFile(file, 'b3');
-    if (url) rows.push({ client_id: clientId, document_type: 'B3', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of permisFiles) {
-    const url = await uploadFile(file, 'permis');
-    if (url) rows.push({ client_id: clientId, document_type: 'Permis', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of clientPhotoFiles) {
-    const url = await uploadFile(file, 'photo');
-    if (url) rows.push({ client_id: clientId, document_type: 'Photo Client', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of contratMunicipaliteFiles) {
-    const url = await uploadFile(file, 'contrat-municipalite');
-    if (url) rows.push({ client_id: clientId, document_type: 'Contrat Municipalité', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of ticketReceiptFiles) {
-    const url = await uploadFile(file, 'recu-ticket');
-    if (url) rows.push({ client_id: clientId, document_type: 'Reçu Paiement Billet', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of handwrittenReceiptFiles) {
-    const url = await uploadFile(file, 'recu-manuscrit');
-    if (url) rows.push({ client_id: clientId, document_type: 'Reçu Manuscrit', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
-  for (const file of paymentProofFiles) {
-    const url = await uploadFile(file, 'preuve-paiement');
-    if (url) rows.push({ client_id: clientId, document_type: 'Justificatif Paiement', file_url: url, file_name: file.name, uploaded_by: uploadedBy, status: 'Présent' });
-  }
+  const rows: any[] = [];
+  await addRows(cinFiles, 'cin', 'CIN', rows);
+  await addRows(passportFiles, 'passeport', 'Passeport', rows);
+  await addRows(diplomeFiles, 'diplome', 'Diplôme', rows);
+  await addRows(b3Files, 'b3', 'B3', rows);
+  await addRows(permisFiles, 'permis', 'Permis', rows);
+  await addRows(clientPhotoFiles, 'photo', 'Photo Client', rows);
+  await addRows(contratMunicipaliteFiles, 'contrat-municipalite', 'Contrat Municipalité', rows);
+  await addRows(ticketReceiptFiles, 'recu-ticket', 'Reçu Paiement Billet', rows);
+  await addRows(handwrittenReceiptFiles, 'recu-manuscrit', 'Reçu Manuscrit', rows);
+  await addRows(paymentProofFiles, 'preuve-paiement', 'Justificatif Paiement', rows);
 
-  if (rows.length > 0) {
-    const { error } = await supabase.from('documents').insert(rows);
-    if (error) console.error('Document insert error:', error.message);
+  if (rows.length === 0) return null; // all storage uploads failed; errors already toasted above
+
+  const { error } = await supabase.from('documents').insert(rows);
+  if (error) {
+    console.error('Document DB insert error:', error.message);
+    return error.message;
   }
+  return null;
 };
 
 export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId }) => {
@@ -468,31 +474,44 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
         const { error: updateError } = await supabase
           .from('clients')
           .update(payload)
-          .eq('id', clientId)
-          .select()
-          .single();
+          .eq('id', clientId);
         if (updateError) {
           console.error('Update client error:', updateError);
-          throw new Error(`Erreur lors de la mise à jour: ${updateError.message}`);
+          toast.error(`Erreur lors de la mise à jour: ${updateError.message}`);
+          return;
         }
         resolvedClientId = clientId;
       } else {
-        const { data: insertedData, error: insertError } = await supabase.from('clients').insert(payload).select('id').single();
+        const { data: insertedData, error: insertError } = await supabase
+          .from('clients')
+          .insert(payload)
+          .select('id')
+          .single();
         if (insertError) {
           console.error('Insert client error:', insertError);
-          throw new Error(`Erreur lors de la création: ${insertError.message}`);
+          toast.error(`Erreur lors de la création: ${insertError.message}`);
+          return;
         }
-        if (!insertedData) throw new Error('Aucune donnée retournée après insertion');
+        if (!insertedData) {
+          toast.error('Aucune donnée retournée après insertion');
+          return;
+        }
         resolvedClientId = insertedData.id;
       }
 
-      // 2. BACKGROUND UPLOADS (Non-blocking)
+      // 2. UPLOADS (blocking — must complete before redirect so errors surface)
       const hasUploads = cinFiles.length > 0 || passportFiles.length > 0 || diplomeFiles.length > 0 || b3Files.length > 0 || permisFiles.length > 0 || clientPhotoFiles.length > 0 || contratMunicipaliteFiles.length > 0 || ticketReceiptFiles.length > 0 || handwrittenReceiptFiles.length > 0 || paymentProofFiles.length > 0;
       if (hasUploads && resolvedClientId) {
-        uploadDocumentsForClient(resolvedClientId, cinFiles, passportFiles, diplomeFiles, b3Files, permisFiles, clientPhotoFiles, contratMunicipaliteFiles, ticketReceiptFiles, handwrittenReceiptFiles, paymentProofFiles, user?.id).catch(err => {
-          console.error("Erreur d'upload secondaire:", err);
-          toast.error("Certains documents n'ont pas pu être enregistrés.");
-        });
+        const uploadError = await uploadDocumentsForClient(
+          resolvedClientId, cinFiles, passportFiles, diplomeFiles, b3Files, permisFiles,
+          clientPhotoFiles, contratMunicipaliteFiles, ticketReceiptFiles,
+          handwrittenReceiptFiles, paymentProofFiles, user?.id
+        );
+        if (uploadError) {
+          toast.error(`Certains documents n'ont pas pu être enregistrés: ${uploadError}`);
+        } else {
+          queryClient.invalidateQueries({ queryKey: ['documents', resolvedClientId] });
+        }
       }
 
       // 3. LOG ACTIVITY (Non-blocking for redirect)

@@ -1,5 +1,39 @@
 -- Supabase Schema for TRAVELAMAL CRM
 
+-- ============================================================
+-- STORAGE: client-documents bucket
+-- Run this block ONCE in the Supabase SQL editor.
+-- It creates the bucket and grants authenticated users full
+-- read/write access so CIN, Diplôme, B3, etc. uploads work.
+-- ============================================================
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('client-documents', 'client-documents', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Allow any authenticated user to upload files
+DROP POLICY IF EXISTS "Authenticated users can upload documents" ON storage.objects;
+CREATE POLICY "Authenticated users can upload documents"
+  ON storage.objects FOR INSERT
+  WITH CHECK (bucket_id = 'client-documents' AND auth.uid() IS NOT NULL);
+
+-- Allow any authenticated user to read documents
+DROP POLICY IF EXISTS "Authenticated users can read documents" ON storage.objects;
+CREATE POLICY "Authenticated users can read documents"
+  ON storage.objects FOR SELECT
+  USING (bucket_id = 'client-documents' AND auth.uid() IS NOT NULL);
+
+-- Allow uploader or admin to update/replace files
+DROP POLICY IF EXISTS "Authenticated users can update documents" ON storage.objects;
+CREATE POLICY "Authenticated users can update documents"
+  ON storage.objects FOR UPDATE
+  USING (bucket_id = 'client-documents' AND auth.uid() IS NOT NULL);
+
+-- Allow uploader or admin to delete files
+DROP POLICY IF EXISTS "Authenticated users can delete documents" ON storage.objects;
+CREATE POLICY "Authenticated users can delete documents"
+  ON storage.objects FOR DELETE
+  USING (bucket_id = 'client-documents' AND auth.uid() IS NOT NULL);
+
 -- profiles (extends auth.users)
 CREATE TABLE profiles (
   id uuid PRIMARY KEY REFERENCES auth.users ON DELETE CASCADE,
@@ -71,7 +105,10 @@ CREATE TABLE payments (
 CREATE TABLE documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id uuid REFERENCES clients(id) ON DELETE CASCADE,
-  document_type text CHECK (document_type IN ('Passeport','CIN','Photo','Acte de naissance','Fiche familiale','Justificatif bancaire','Assurance','Réservation vol','Autre')),
+  document_type text CHECK (document_type IN (
+    'Passeport','CIN','Photo','Acte de naissance','Fiche familiale',
+    'Justificatif bancaire','Assurance','Réservation vol','Autre'
+  )),
   file_url text NOT NULL,
   file_name text,
   upload_date timestamptz DEFAULT now(),
