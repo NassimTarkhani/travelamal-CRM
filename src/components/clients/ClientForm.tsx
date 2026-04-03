@@ -500,7 +500,7 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
 
       // Force a small delay to ensure toast is visible and cache is ready
       setTimeout(() => {
-        navigate('/clients');
+        navigate(clientId ? `/clients/${clientId}` : '/clients');
       }, 100);
 
     } catch (error: any) {
@@ -509,8 +509,15 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
     }
   };
 
+  const onValidationError = (errors: Record<string, any>) => {
+    const firstError = Object.values(errors)[0];
+    const message = firstError?.message || 'Veuillez corriger les erreurs du formulaire.';
+    toast.error(message);
+    console.error('Validation errors:', errors);
+  };
+
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-8">
+    <form onSubmit={handleSubmit(onSubmit, onValidationError)} className="space-y-8">
       {/* Section 1: Personnel */}
       <div className="space-y-6">
         <div className="flex items-center space-x-2">
