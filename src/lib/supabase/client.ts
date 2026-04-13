@@ -19,12 +19,14 @@ export const supabase = createClient(
       autoRefreshToken: isSupabaseConfigured,
       detectSessionInUrl: isSupabaseConfigured,
     },
-    global: {
-      fetch: (url, options = {}) =>
-        fetch(url, { ...options, cache: 'no-store' }),
-    },
-    db: {
-      schema: 'public',
-    },
+
   }
 );
+
+// Fire a silent warmup ping immediately so the free-tier project wakes up
+// before the user tries to save anything.
+if (isSupabaseConfigured) {
+  supabase.from('clients').select('id').limit(1).then(() => {
+    console.log('[Supabase] warmup ping done');
+  }).catch(() => { });
+}

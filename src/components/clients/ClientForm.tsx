@@ -59,12 +59,17 @@ const uploadDocumentsForClient = async (
 ): Promise<string | null> => {
   const uploadFile = async (file: File, folder: string): Promise<string | null> => {
     const ext = file.name.split('.').pop() || 'bin';
-    // upsert:true prevents "already exists" errors on retry
     const path = `${clientId}/${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
 
-    const { error } = await supabase.storage
+    const uploadPromise = supabase.storage
       .from('client-documents')
       .upload(path, file, { upsert: true });
+
+    const timeoutPromise = new Promise<{ error: Error }>(resolve =>
+      setTimeout(() => resolve({ error: new Error(`Délai dépassé pour ${file.name}`) }), 45000)
+    );
+
+    const { error } = await Promise.race([uploadPromise, timeoutPromise]) as { error: any };
 
     if (error) {
       console.error(`Storage upload failed [${folder}/${file.name}]:`, error.message);
@@ -75,34 +80,38 @@ const uploadDocumentsForClient = async (
     return publicUrl;
   };
 
-  const addRows = async (files: File[], folder: string, labelType: string, rows: any[]) => {
-    const dbType = DOC_TYPE_MAP[labelType] ?? 'Autre';
-    for (const file of files) {
+  // Flatten all files into one task list and upload all in parallel
+  const allTasks: Array<{ file: File; folder: string; labelType: string }> = [
+    ...cinFiles.map(f => ({ file: f, folder: 'cin', labelType: 'CIN' })),
+    ...passportFiles.map(f => ({ file: f, folder: 'passeport', labelType: 'Passeport' })),
+    ...diplomeFiles.map(f => ({ file: f, folder: 'diplome', labelType: 'Diplôme' })),
+    ...b3Files.map(f => ({ file: f, folder: 'b3', labelType: 'B3' })),
+    ...permisFiles.map(f => ({ file: f, folder: 'permis', labelType: 'Permis' })),
+    ...clientPhotoFiles.map(f => ({ file: f, folder: 'photo', labelType: 'Photo Client' })),
+    ...contratMunicipaliteFiles.map(f => ({ file: f, folder: 'contrat-municipalite', labelType: 'Contrat Municipalité' })),
+    ...ticketReceiptFiles.map(f => ({ file: f, folder: 'recu-ticket', labelType: 'Reçu Paiement Billet' })),
+    ...handwrittenReceiptFiles.map(f => ({ file: f, folder: 'recu-manuscrit', labelType: 'Reçu Manuscrit' })),
+    ...paymentProofFiles.map(f => ({ file: f, folder: 'preuve-paiement', labelType: 'Justificatif Paiement' })),
+  ];
+
+  if (allTasks.length === 0) return null;
+
+  const results = await Promise.all(
+    allTasks.map(async ({ file, folder, labelType }) => {
       const url = await uploadFile(file, folder);
-      if (url) rows.push({
+      if (!url) return null;
+      return {
         client_id: clientId,
-        document_type: dbType,
+        document_type: DOC_TYPE_MAP[labelType] ?? 'Autre',
         file_url: url,
-        // Prefix original type into filename so it shows clearly in DocumentsTab
         file_name: `[${labelType}] ${file.name}`,
         uploaded_by: uploadedBy,
-        status: 'Présent',
-      });
-    }
-  };
+        status: 'Présent' as const,
+      };
+    })
+  );
 
-  const rows: any[] = [];
-  await addRows(cinFiles, 'cin', 'CIN', rows);
-  await addRows(passportFiles, 'passeport', 'Passeport', rows);
-  await addRows(diplomeFiles, 'diplome', 'Diplôme', rows);
-  await addRows(b3Files, 'b3', 'B3', rows);
-  await addRows(permisFiles, 'permis', 'Permis', rows);
-  await addRows(clientPhotoFiles, 'photo', 'Photo Client', rows);
-  await addRows(contratMunicipaliteFiles, 'contrat-municipalite', 'Contrat Municipalité', rows);
-  await addRows(ticketReceiptFiles, 'recu-ticket', 'Reçu Paiement Billet', rows);
-  await addRows(handwrittenReceiptFiles, 'recu-manuscrit', 'Reçu Manuscrit', rows);
-  await addRows(paymentProofFiles, 'preuve-paiement', 'Justificatif Paiement', rows);
-
+  const rows = results.filter((r): r is NonNullable<typeof r> => r !== null);
   if (rows.length === 0) return null; // all storage uploads failed; errors already toasted above
 
   const { error } = await supabase.from('documents').insert(rows);
@@ -127,8 +136,9 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
   const [ticketReceiptFiles, setTicketReceiptFiles] = useState<File[]>([]);
   const [handwrittenReceiptFiles, setHandwrittenReceiptFiles] = useState<File[]>([]);
   const [paymentProofFiles, setPaymentProofFiles] = useState<File[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
 
-  const { register, handleSubmit, watch, setValue, reset, formState: { errors, isSubmitting } } = useForm<ClientFormData>({
+  const { register, handleSubmit, watch, setValue, reset, formState: { errors } } = useForm<ClientFormData>({
     resolver: zodResolver(clientSchema),
     defaultValues: initialData || {
       service: 'Visa Schengen',
@@ -437,118 +447,113 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
   };
 
   const onSubmit: SubmitHandler<ClientFormData> = async (data) => {
+    if (isSaving) return;
+    setIsSaving(true);
+
+    const color_tag = SERVICE_CONFIG[data.service]?.color || '#6B7280';
+    const { amount_remaining, payment_status, sequential_number, ...sanitizedData } = data as any;
+    (Object.keys(sanitizedData) as Array<string>).forEach(key => {
+      if (sanitizedData[key] === '') (sanitizedData as any)[key] = null;
+    });
+    if (passportFiles.length > 0) sanitizedData.passport_alert_done = false;
+    if (b3Files.length > 0) sanitizedData.b3_alert_done = false;
+    if (ticketReceiptFiles.length > 0) sanitizedData.travel_alert_done = false;
+
+    const payload = { ...sanitizedData, color_tag };
+    if (!clientId) (payload as any).created_by = user?.id;
+
+    if (!clientId && contratMunicipaliteFiles.length === 0) {
+      toast.error("Le contrat de municipalité est obligatoire.");
+      setIsSaving(false);
+      return;
+    }
+
+    // Snapshot files before any async work
+    const uploadArgs = [
+      cinFiles, passportFiles, diplomeFiles, b3Files, permisFiles,
+      clientPhotoFiles, contratMunicipaliteFiles, ticketReceiptFiles,
+      handwrittenReceiptFiles, paymentProofFiles,
+    ] as const;
+    const hasUploads = uploadArgs.some(arr => arr.length > 0);
+
+    // Show progress toast
+    const savingToastId = toast.loading(clientId ? 'Mise à jour en cours...' : 'Création en cours...');
+
     try {
-      const color_tag = SERVICE_CONFIG[data.service]?.color || '#6B7280';
-
-      const { amount_remaining, payment_status, sequential_number, ...sanitizedData } = data as any;
-      (Object.keys(sanitizedData) as Array<string>).forEach(key => {
-        if (sanitizedData[key] === '') (sanitizedData as any)[key] = null;
-      });
-
-      // Reset alert flags if new files are uploaded
-      if (passportFiles.length > 0) sanitizedData.passport_alert_done = false;
-      if (b3Files.length > 0) sanitizedData.b3_alert_done = false;
-      if (ticketReceiptFiles.length > 0) sanitizedData.travel_alert_done = false;
-
-      const payload = {
-        ...sanitizedData,
-        color_tag,
-      };
-
-      if (!clientId) {
-        (payload as any).created_by = user?.id;
-      }
-
-      console.log('Tentative d\'enregistrement:', payload.full_name);
-
-      // Validation: Contrat Municipalité is obligatory on creation
-      if (!clientId && contratMunicipaliteFiles.length === 0) {
-        toast.error("Le contrat de municipalité est obligatoire.");
-        return;
-      }
-
       let resolvedClientId: string | undefined;
 
-      // 1. PRIMARY SAVE
+      // 1. DB SAVE
+      console.time('[CRM] db-save');
+      console.log('[CRM] starting db save, payload keys:', Object.keys(payload));
       if (clientId) {
-        const { error: updateError } = await supabase
-          .from('clients')
-          .update(payload)
-          .eq('id', clientId);
-        if (updateError) {
-          console.error('Update client error:', updateError);
-          toast.error(`Erreur lors de la mise à jour: ${updateError.message}`);
+        const { error } = await supabase.from('clients').update(payload).eq('id', clientId);
+        console.timeEnd('[CRM] db-save');
+        if (error) {
+          toast.dismiss(savingToastId);
+          toast.error(`Erreur mise à jour: ${error.message}`);
           return;
         }
         resolvedClientId = clientId;
       } else {
-        const { data: insertedData, error: insertError } = await supabase
-          .from('clients')
-          .insert(payload)
-          .select('id')
-          .single();
-        if (insertError) {
-          console.error('Insert client error:', insertError);
-          toast.error(`Erreur lors de la création: ${insertError.message}`);
+        // Generate UUID client-side to avoid .select().single() which can stall
+        // due to RLS read-back on INSERT
+        const newId = crypto.randomUUID();
+        if (!payload.folder_opening_date) {
+          payload.folder_opening_date = new Date().toISOString().split('T')[0];
+        }
+        const { error } = await supabase
+          .from('clients').insert({ ...payload, id: newId });
+        console.timeEnd('[CRM] db-save');
+        if (error) {
+          toast.dismiss(savingToastId);
+          toast.error(`Erreur création: ${error.message}`);
           return;
         }
-        if (!insertedData) {
-          toast.error('Aucune donnée retournée après insertion');
-          return;
-        }
-        resolvedClientId = insertedData.id;
+        resolvedClientId = newId;
       }
+      console.log('[CRM] db save done, id:', resolvedClientId);
 
-      // 2. UPLOADS (blocking — must complete before redirect so errors surface)
-      const hasUploads = cinFiles.length > 0 || passportFiles.length > 0 || diplomeFiles.length > 0 || b3Files.length > 0 || permisFiles.length > 0 || clientPhotoFiles.length > 0 || contratMunicipaliteFiles.length > 0 || ticketReceiptFiles.length > 0 || handwrittenReceiptFiles.length > 0 || paymentProofFiles.length > 0;
-      if (hasUploads && resolvedClientId) {
-        const uploadError = await uploadDocumentsForClient(
-          resolvedClientId, cinFiles, passportFiles, diplomeFiles, b3Files, permisFiles,
-          clientPhotoFiles, contratMunicipaliteFiles, ticketReceiptFiles,
-          handwrittenReceiptFiles, paymentProofFiles, user?.id
-        );
-        if (uploadError) {
-          toast.error(`Certains documents n'ont pas pu être enregistrés: ${uploadError}`);
-        } else {
-          queryClient.invalidateQueries({ queryKey: ['documents', resolvedClientId] });
+      // 2. NAVIGATE IMMEDIATELY after DB save
+      toast.dismiss(savingToastId);
+      toast.success(clientId ? 'Client mis à jour ✓' : 'Client créé ✓');
+      navigate(clientId ? `/clients/${clientId}` : '/clients');
+
+      // 3. UPLOADS + ACTIVITY + INVALIDATION — all in background after navigation
+      const cid = resolvedClientId;
+      (async () => {
+        if (hasUploads && cid) {
+          const uploadError = await uploadDocumentsForClient(cid, ...uploadArgs, user?.id);
+          if (uploadError) {
+            toast.error(`Documents: ${uploadError}`);
+          } else {
+            queryClient.invalidateQueries({ queryKey: ['documents', cid] });
+            toast.success('Documents téléchargés ✓');
+          }
         }
-      }
 
-      // 3. LOG ACTIVITY (Non-blocking for redirect)
-      if (resolvedClientId) {
         supabase.from('activities').insert([{
-          client_id: resolvedClientId,
+          client_id: cid,
           action_type: clientId ? 'Modification' : 'Création',
           description: `${clientId ? 'Dossier mis à jour' : 'Nouveau dossier créé'} par ${user?.email || 'admin'}`,
           performed_by: user?.id,
-        }]).then(({ error }) => {
-          if (error) console.error('Activity log error (non-fatal):', error);
-        });
-      }
+        }]).then(({ error }) => { if (error) console.error('Activity log:', error); });
 
-      // 4. INVALIDATE & REDIRECT
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['clients'] }),
-        queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] }),
-        queryClient.invalidateQueries({ queryKey: ['all-activities'] }),
-        ...(clientId ? [
-          queryClient.invalidateQueries({ queryKey: ['client', clientId] }),
-          queryClient.invalidateQueries({ queryKey: ['client-edit', clientId] }),
-          queryClient.invalidateQueries({ queryKey: ['client-payments', clientId] }),
-          queryClient.invalidateQueries({ queryKey: ['documents', clientId] }),
-        ] : []),
-      ]);
-
-      toast.success(clientId ? 'Client mis à jour' : 'Client créé avec succès');
-
-      // Force a small delay to ensure toast is visible and cache is ready
-      setTimeout(() => {
-        navigate(clientId ? `/clients/${clientId}` : '/clients');
-      }, 100);
+        queryClient.invalidateQueries({ queryKey: ['clients'] });
+        queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+        if (clientId) {
+          queryClient.invalidateQueries({ queryKey: ['client', clientId] });
+          queryClient.invalidateQueries({ queryKey: ['client-edit', clientId] });
+          queryClient.invalidateQueries({ queryKey: ['client-payments', clientId] });
+          queryClient.invalidateQueries({ queryKey: ['documents', clientId] });
+        }
+      })();
 
     } catch (error: any) {
+      toast.dismiss(savingToastId);
       console.error('Erreur globale onSubmit:', error);
       toast.error(error?.message || 'Une erreur est survenue lors de l\'enregistrement.');
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -956,9 +961,9 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
         <Button
           type="submit"
           className="bg-blue hover:bg-blue/90 rounded-xl px-12"
-          disabled={isSubmitting}
+          disabled={isSaving}
         >
-          {isSubmitting ? 'Enregistrement...' : clientId ? 'Mettre à jour' : 'Créer le dossier'}
+          {isSaving ? 'Enregistrement...' : clientId ? 'Mettre à jour' : 'Créer le dossier'}
         </Button>
       </div>
     </form>
