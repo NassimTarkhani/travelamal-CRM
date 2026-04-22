@@ -18,6 +18,8 @@ const buildStubProfile = (user: any): Profile => {
   } as Profile;
 };
 
+const profileInsertBlockedForUser = new Set<string>();
+
 const fetchOrCreateProfile = async (user: any): Promise<Profile> => {
   const fallbackName =
     (user.user_metadata?.name as string | undefined) ||
@@ -25,7 +27,10 @@ const fetchOrCreateProfile = async (user: any): Promise<Profile> => {
   const requestedRole = user.user_metadata?.role;
   const safeRole = requestedRole === 'Admin' || requestedRole === 'Employé' ? requestedRole : 'Employé';
 
-  // SELECT existing profile
+  // SELECT existing profile. If SELECT is blocked by RLS, attempt INSERT below
+  // before falling back to a local stub — this helps avoid requiring a hard
+  // refresh when policies are in flux on the Supabase project.
+  let selectBlocked = false;
   const { data: existingProfile, error: selectError } = await supabase
     .from('profiles')
     .select('*')
@@ -33,30 +38,60 @@ const fetchOrCreateProfile = async (user: any): Promise<Profile> => {
     .maybeSingle();
 
   if (selectError) {
-    console.warn('Profile SELECT blocked (RLS?), using stub:', selectError.message);
-    return buildStubProfile(user);
+    console.warn('Profile SELECT blocked (RLS?) — will attempt insert fallback:', selectError.message);
+    selectBlocked = true;
   }
 
   if (existingProfile) return existingProfile as Profile;
 
-  // INSERT new profile
-  const { data: createdProfile, error: insertError } = await supabase
+  if (profileInsertBlockedForUser.has(user.id)) {
+    return buildStubProfile(user);
+  }
+
+  // INSERT new profile without doing a server-side SELECT during the same request
+  // (select on insert can trigger extra reads that RLS may block and cause hangs).
+  const { data: insertData, error: insertError } = await supabase
     .from('profiles')
     .insert({
       id: user.id,
       email: user.email,
       name: fallbackName,
       role: safeRole,
-    })
-    .select('*')
-    .single();
+    });
 
   if (insertError) {
-    console.warn('Profile INSERT blocked (RLS?), using stub:', insertError.message);
+    console.warn('Profile INSERT blocked (RLS?), attempting safe fallback:', insertError.message);
+    profileInsertBlockedForUser.add(user.id);
+
+    // Try to read an existing profile; if that is blocked too, return a safe local stub.
+    try {
+      const { data: existingAfterInsert, error: existingError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      if (!existingError && existingAfterInsert) return existingAfterInsert as Profile;
+    } catch (e) {
+      // ignore and fallthrough to stub
+    }
+
     return buildStubProfile(user);
   }
 
-  return (createdProfile as Profile) ?? buildStubProfile(user);
+  // INSERT succeeded — do a follow-up SELECT to get the full profile row.
+  try {
+    const { data: after, error: afterErr } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .maybeSingle();
+    if (!afterErr && after) return after as Profile;
+  } catch (e) {
+    // ignore
+  }
+
+  return buildStubProfile(user);
 };
 
 interface AuthState {
@@ -106,10 +141,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({ user: null, profile: null, loading: false, initialized: true });
       }
 
-      supabase.auth.onAuthStateChange(async (_event, session) => {
+      supabase.auth.onAuthStateChange(async (event, session) => {
+        // INITIAL_SESSION fires immediately when the listener is registered.
+        // We already fetched the profile above via getSession() — skip the
+        // duplicate query to avoid holding a Supabase connection unnecessarily.
+        if (event === 'INITIAL_SESSION') return;
+
         try {
           if (session?.user) {
-            const profile = await fetchOrCreateProfile(session.user);
+            // TOKEN_REFRESHED only rotates the JWT — the profile row doesn't
+            // change, so reuse the cached profile instead of hitting the DB again.
+            const existingProfile = get().profile;
+            const profile =
+              event === 'TOKEN_REFRESHED' && existingProfile?.id === session.user.id
+                ? existingProfile
+                : await fetchOrCreateProfile(session.user);
             set({ user: session.user, profile, loading: false });
           } else {
             set({ user: null, profile: null, loading: false });

@@ -43,6 +43,21 @@ const DOC_TYPE_MAP: Record<string, string> = {
   'Justificatif Paiement': 'Justificatif bancaire',
 };
 
+// Timeout wrapper used only for storage uploads.
+const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new Error(`${label}: délai dépassé. Réessayez.`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutHandle!);
+  }
+};
+
 const uploadDocumentsForClient = async (
   clientId: string,
   cinFiles: File[],
@@ -57,27 +72,45 @@ const uploadDocumentsForClient = async (
   paymentProofFiles: File[],
   uploadedBy: string | undefined
 ): Promise<string | null> => {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const failedUploads: string[] = [];
+
   const uploadFile = async (file: File, folder: string): Promise<string | null> => {
-    const ext = file.name.split('.').pop() || 'bin';
-    const path = `${clientId}/${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const ext = (file.name.split('.').pop() || 'bin').toLowerCase();
+      const path = `${clientId}/${folder}/${crypto.randomUUID()}.${ext}`;
 
-    const uploadPromise = supabase.storage
-      .from('client-documents')
-      .upload(path, file, { upsert: true });
+      // Use withTimeout to avoid indefinite hangs from storage network issues
+      const uploadOp = supabase.storage
+        .from('client-documents')
+        .upload(path, file, { upsert: false, cacheControl: '3600' });
 
-    const timeoutPromise = new Promise<{ error: Error }>(resolve =>
-      setTimeout(() => resolve({ error: new Error(`Délai dépassé pour ${file.name}`) }), 45000)
-    );
+      const { error } = await (async () => {
+        try {
+          return await withTimeout(uploadOp, 20000, `Storage upload ${folder}/${file.name}`);
+        } catch (e) {
+          // Convert timeout rejection into an object shape similar to supabase error for unified handling
+          return { error: { message: (e as Error).message } } as any;
+        }
+      })();
 
-    const { error } = await Promise.race([uploadPromise, timeoutPromise]) as { error: any };
+      if (!error) {
+        const { data: { publicUrl } } = supabase.storage.from('client-documents').getPublicUrl(path);
+        return publicUrl;
+      }
 
-    if (error) {
+      if (attempt < 4) {
+        // Exponential backoff with jitter for transient storage/network failures.
+        const delay = Math.min(400 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250), 3000);
+        await sleep(delay);
+        continue;
+      }
+
       console.error(`Storage upload failed [${folder}/${file.name}]:`, error.message);
-      toast.error(`Upload échoué (${file.name}): ${error.message}`);
-      return null;
+      failedUploads.push(`${folder}/${file.name}`);
     }
-    const { data: { publicUrl } } = supabase.storage.from('client-documents').getPublicUrl(path);
-    return publicUrl;
+
+    return null;
   };
 
   // Flatten all files into one task list and upload all in parallel
@@ -96,29 +129,52 @@ const uploadDocumentsForClient = async (
 
   if (allTasks.length === 0) return null;
 
-  const results = await Promise.all(
-    allTasks.map(async ({ file, folder, labelType }) => {
-      const url = await uploadFile(file, folder);
-      if (!url) return null;
-      return {
-        client_id: clientId,
-        document_type: DOC_TYPE_MAP[labelType] ?? 'Autre',
-        file_url: url,
-        file_name: `[${labelType}] ${file.name}`,
-        uploaded_by: uploadedBy,
-        status: 'Présent' as const,
-      };
-    })
-  );
+  const results: Array<{
+    client_id: string;
+    document_type: string;
+    file_url: string;
+    file_name: string;
+    uploaded_by: string | undefined;
+    status: 'Présent';
+  } | null> = [];
+
+  const CONCURRENCY = 3;
+  for (let i = 0; i < allTasks.length; i += CONCURRENCY) {
+    const batch = allTasks.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map(async ({ file, folder, labelType }) => {
+        const url = await uploadFile(file, folder);
+        if (!url) return null;
+        return {
+          client_id: clientId,
+          document_type: DOC_TYPE_MAP[labelType] ?? 'Autre',
+          file_url: url,
+          file_name: `[${labelType}] ${file.name}`,
+          uploaded_by: uploadedBy,
+          status: 'Présent' as const,
+        };
+      })
+    );
+    results.push(...batchResults);
+  }
 
   const rows = results.filter((r): r is NonNullable<typeof r> => r !== null);
-  if (rows.length === 0) return null; // all storage uploads failed; errors already toasted above
+  if (rows.length === 0) {
+    return failedUploads.length > 0
+      ? `Aucun document n'a pu être téléchargé (${failedUploads.length} échecs)`
+      : 'Aucun document n\'a pu être téléchargé';
+  }
 
   const { error } = await supabase.from('documents').insert(rows);
   if (error) {
     console.error('Document DB insert error:', error.message);
     return error.message;
   }
+
+  if (failedUploads.length > 0) {
+    return `${failedUploads.length} document(s) non téléchargé(s). Réessayez.`;
+  }
+
   return null;
 };
 
@@ -137,6 +193,17 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
   const [handwrittenReceiptFiles, setHandwrittenReceiptFiles] = useState<File[]>([]);
   const [paymentProofFiles, setPaymentProofFiles] = useState<File[]>([]);
   const [isSaving, setIsSaving] = useState(false);
+  const savingToastRef = React.useRef<string | number | undefined>(undefined);
+
+  // Dismiss any lingering save toast when component mounts or unmounts
+  // (prevents a stale "Création en cours..." toast from a previous navigation).
+  useEffect(() => {
+    return () => {
+      if (savingToastRef.current !== undefined) {
+        toast.dismiss(savingToastRef.current);
+      }
+    };
+  }, []);
 
   const { register, handleSubmit, watch, setValue, reset, formState: { errors } } = useForm<ClientFormData>({
     resolver: zodResolver(clientSchema),
@@ -222,6 +289,7 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
   const amountPaid = watch('amount_paid') || 0;
   const amountRemaining = totalAmount - amountPaid;
   const service = watch('service');
+
 
   const handlePrintReceipt = async () => {
     const data = watch();
@@ -478,79 +546,85 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
 
     // Show progress toast
     const savingToastId = toast.loading(clientId ? 'Mise à jour en cours...' : 'Création en cours...');
+    savingToastRef.current = savingToastId;
 
     try {
       let resolvedClientId: string | undefined;
 
       // 1. DB SAVE
-      console.time('[CRM] db-save');
-      console.log('[CRM] starting db save, payload keys:', Object.keys(payload));
       if (clientId) {
-        const { error } = await supabase.from('clients').update(payload).eq('id', clientId);
-        console.timeEnd('[CRM] db-save');
+        const { error } = await supabase
+          .from('clients')
+          .update(payload)
+          .eq('id', clientId);
         if (error) {
           toast.dismiss(savingToastId);
+          savingToastRef.current = undefined;
           toast.error(`Erreur mise à jour: ${error.message}`);
           return;
         }
         resolvedClientId = clientId;
       } else {
-        // Generate UUID client-side to avoid .select().single() which can stall
-        // due to RLS read-back on INSERT
-        const newId = crypto.randomUUID();
         if (!payload.folder_opening_date) {
           payload.folder_opening_date = new Date().toISOString().split('T')[0];
         }
-        const { error } = await supabase
-          .from('clients').insert({ ...payload, id: newId });
-        console.timeEnd('[CRM] db-save');
-        if (error) {
+        const { data: inserted, error: createError } = await supabase
+          .from('clients')
+          .insert(payload)
+          .select('id')
+          .single();
+        if (createError) {
           toast.dismiss(savingToastId);
-          toast.error(`Erreur création: ${error.message}`);
+          savingToastRef.current = undefined;
+          toast.error(`Erreur création: ${createError.message}`);
           return;
         }
-        resolvedClientId = newId;
+        resolvedClientId = inserted?.id;
       }
-      console.log('[CRM] db save done, id:', resolvedClientId);
 
-      // 2. NAVIGATE IMMEDIATELY after DB save
+      const cid = resolvedClientId;
+
+      // 2. ACTIVITY + INVALIDATION (fire-and-forget)
+      supabase.from('activities').insert([{
+        client_id: cid,
+        action_type: clientId ? 'Modification' : 'Création',
+        description: `${clientId ? 'Dossier mis à jour' : 'Nouveau dossier créé'} par ${user?.email || 'admin'}`,
+        performed_by: user?.id,
+      }]).then(({ error }) => { if (error) console.error('Activity log:', error); });
+
+      queryClient.invalidateQueries({ queryKey: ['clients'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      if (clientId) {
+        queryClient.invalidateQueries({ queryKey: ['client', clientId] });
+        queryClient.invalidateQueries({ queryKey: ['client-edit', clientId] });
+        queryClient.invalidateQueries({ queryKey: ['client-payments', clientId] });
+        queryClient.invalidateQueries({ queryKey: ['documents', clientId] });
+      }
+
+      // 3. SUCCESS + NAVIGATE immediately — don't block on uploads
       toast.dismiss(savingToastId);
+      savingToastRef.current = undefined;
       toast.success(clientId ? 'Client mis à jour ✓' : 'Client créé ✓');
       navigate(clientId ? `/clients/${clientId}` : '/clients');
+      setIsSaving(false);
 
-      // 3. UPLOADS + ACTIVITY + INVALIDATION — all in background after navigation
-      const cid = resolvedClientId;
-      (async () => {
-        if (hasUploads && cid) {
-          const uploadError = await uploadDocumentsForClient(cid, ...uploadArgs, user?.id);
+      // 4. UPLOAD DOCUMENTS in background after navigation
+      if (hasUploads && cid) {
+        const uploadToastId = toast.loading('Téléchargement des documents...');
+        uploadDocumentsForClient(cid, ...uploadArgs, user?.id).then(uploadError => {
+          toast.dismiss(uploadToastId);
           if (uploadError) {
-            toast.error(`Documents: ${uploadError}`);
+            toast.error(`Documents non enregistrés: ${uploadError}`);
           } else {
-            queryClient.invalidateQueries({ queryKey: ['documents', cid] });
-            toast.success('Documents téléchargés ✓');
+            toast.success('Documents enregistrés ✓');
           }
-        }
-
-        supabase.from('activities').insert([{
-          client_id: cid,
-          action_type: clientId ? 'Modification' : 'Création',
-          description: `${clientId ? 'Dossier mis à jour' : 'Nouveau dossier créé'} par ${user?.email || 'admin'}`,
-          performed_by: user?.id,
-        }]).then(({ error }) => { if (error) console.error('Activity log:', error); });
-
-        queryClient.invalidateQueries({ queryKey: ['clients'] });
-        queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
-        if (clientId) {
-          queryClient.invalidateQueries({ queryKey: ['client', clientId] });
-          queryClient.invalidateQueries({ queryKey: ['client-edit', clientId] });
-          queryClient.invalidateQueries({ queryKey: ['client-payments', clientId] });
-          queryClient.invalidateQueries({ queryKey: ['documents', clientId] });
-        }
-      })();
+          queryClient.invalidateQueries({ queryKey: ['documents', cid] });
+        });
+      }
 
     } catch (error: any) {
       toast.dismiss(savingToastId);
-      console.error('Erreur globale onSubmit:', error);
+      savingToastRef.current = undefined;
       toast.error(error?.message || 'Une erreur est survenue lors de l\'enregistrement.');
     } finally {
       setIsSaving(false);
@@ -790,7 +864,7 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
             <Label>Employé Responsable</Label>
             <Select
               value={watch('responsible_employee')}
-              onValueChange={(v) => setValue('responsible_employee', v)}
+              onValueChange={(v) => setValue('responsible_employee', v ?? undefined)}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Choisir...">
