@@ -2,7 +2,7 @@ import React from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Edit, ChevronLeft, CreditCard, CheckCircle2, AlertTriangle } from 'lucide-react';
-import { supabase } from '@/lib/supabase/client';
+import { clientsApi } from '@/lib/api/client';
 import { usePermissions } from '@/hooks/usePermissions';
 import { formatCurrency } from '@/lib/utils/formatCurrency';
 import { getServiceStyles } from '@/lib/utils/serviceColors';
@@ -25,18 +25,7 @@ export default function ClientDetailPage() {
 
   const { data: client, isLoading, refetch } = useQuery({
     queryKey: ['client', id],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('clients')
-        .select(`
-          *,
-          responsible_employee:profiles!responsible_employee(name)
-        `)
-        .eq('id', id)
-        .single();
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => clientsApi.get(id!),
   });
 
   if (isLoading) {

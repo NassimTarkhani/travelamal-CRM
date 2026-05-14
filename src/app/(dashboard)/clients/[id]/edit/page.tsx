@@ -2,7 +2,7 @@ import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft } from 'lucide-react';
-import { supabase } from '@/lib/supabase/client';
+import { clientsApi } from '@/lib/api/client';
 import { Button } from '@/components/ui/button';
 import { ClientForm } from '@/components/clients/ClientForm';
 
@@ -12,15 +12,7 @@ export default function EditClientPage() {
 
   const { data: client, isLoading } = useQuery({
     queryKey: ['client-edit', id],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('id', id)
-        .single();
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => clientsApi.get(id!),
   });
 
   if (isLoading) {
@@ -34,9 +26,9 @@ export default function EditClientPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <div className="flex items-center space-x-4">
-        <Button 
-          variant="ghost" 
-          size="icon" 
+        <Button
+          variant="ghost"
+          size="icon"
           onClick={() => navigate(-1)}
           className="rounded-full hover:bg-white"
         >

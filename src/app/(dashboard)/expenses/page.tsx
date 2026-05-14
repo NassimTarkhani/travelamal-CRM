@@ -1,15 +1,15 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { expensesApi, profilesApi, clientsApi } from '@/lib/api/client';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
-import { 
-  Plus, 
-  Wallet, 
-  Search, 
-  Filter, 
-  Download, 
-  Trash2, 
+import {
+  Plus,
+  Wallet,
+  Search,
+  Filter,
+  Download,
+  Trash2,
   Receipt,
   User,
   Calendar,
@@ -38,7 +38,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { ImageUpload } from '@/components/ui/ImageUpload';
 
 export default function ExpensesPage() {
-  const { user, profile } = useAuthStore();
+  const { profile } = useAuthStore();
   const { isAdmin } = usePermissions();
   const queryClient = useQueryClient();
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -48,44 +48,32 @@ export default function ExpensesPage() {
   // Fetch employees for filter (admin only)
   const { data: employees } = useQuery({
     queryKey: ['employees-list-expenses'],
-    queryFn: async () => {
-      const { data } = await supabase.from('profiles').select('id, name, email');
-      return data;
-    },
+    queryFn: () => profilesApi.list(),
     enabled: isAdmin
   });
 
   const { data: expenses, isLoading } = useQuery({
     queryKey: ['expenses', employeeFilter],
-    queryFn: async () => {
-      let query = supabase
-        .from('expenses')
-        .select('*, profiles(name, email), clients(full_name)')
-        .order('created_at', { ascending: false });
-
-      if (employeeFilter !== 'all') {
-        query = query.eq('created_by', employeeFilter);
-      } else if (!isAdmin) {
-        query = query.eq('created_by', user?.id);
-      }
-
-      const { data, error } = await query;
-      if (error) throw error;
-      return data;
+    queryFn: () => {
+      const params: Record<string, string> = {};
+      if (employeeFilter !== 'all') params.created_by = employeeFilter;
+      else if (!isAdmin && profile?.id) params.created_by = profile.id;
+      return expensesApi.list(params);
     },
   });
 
   const deleteExpense = async (id: string) => {
     if (!confirm('Supprimer cette dépense ?')) return;
-    const { error } = await supabase.from('expenses').delete().eq('id', id);
-    if (error) toast.error(error.message);
-    else {
+    try {
+      await expensesApi.delete(id);
       toast.success('Dépense supprimée');
       queryClient.invalidateQueries({ queryKey: ['expenses'] });
+    } catch (error: any) {
+      toast.error(error.message);
     }
   };
 
-  const filteredExpenses = expenses?.filter(e => 
+  const filteredExpenses = expenses?.filter(e =>
     e.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (e.clients?.full_name && e.clients.full_name.toLowerCase().includes(searchTerm.toLowerCase()))
   );
@@ -120,17 +108,17 @@ export default function ExpensesPage() {
       <div className="flex flex-col space-y-4 md:flex-row md:items-center md:space-x-4 md:space-y-0">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-          <Input 
-            placeholder="Rechercher par description ou client..." 
+          <Input
+            placeholder="Rechercher par description ou client..."
             className="pl-10 rounded-xl"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
-        
+
         {isAdmin && (
           <div className="w-full md:w-64">
-            <Select value={employeeFilter} onValueChange={setEmployeeFilter}>
+            <Select value={employeeFilter} onValueChange={(v) => v !== null && setEmployeeFilter(v)}>
               <SelectTrigger className="rounded-xl">
                 <Filter className="mr-2 h-4 w-4 text-gray-400" />
                 <SelectValue placeholder="Filtrer par employé" />
@@ -208,16 +196,19 @@ export default function ExpensesPage() {
                     <td className="px-6 py-4 text-right">
                       <div className="flex items-center justify-end space-x-2">
                         {expense.proof_url && (
-                          <Button variant="ghost" size="icon" className="h-8 w-8 text-blue hover:bg-blue/5" asChild>
-                            <a href={expense.proof_url} target="_blank" rel="noopener noreferrer">
-                              <Receipt className="h-4 w-4" />
-                            </a>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-blue hover:bg-blue/5"
+                            render={<a href={expense.proof_url ?? undefined} target="_blank" rel="noopener noreferrer" />}
+                          >
+                            <Receipt className="h-4 w-4" />
                           </Button>
                         )}
                         {isAdmin && (
-                          <Button 
-                            variant="ghost" 
-                            size="icon" 
+                          <Button
+                            variant="ghost"
+                            size="icon"
                             className="h-8 w-8 text-red hover:bg-red/5"
                             onClick={() => deleteExpense(expense.id)}
                           >
@@ -238,7 +229,6 @@ export default function ExpensesPage() {
 }
 
 function AddExpenseModal({ onSuccess }: { onSuccess: () => void }) {
-  const { user } = useAuthStore();
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [amount, setAmount] = useState('');
@@ -248,10 +238,7 @@ function AddExpenseModal({ onSuccess }: { onSuccess: () => void }) {
 
   const { data: clients } = useQuery({
     queryKey: ['clients-list-short'],
-    queryFn: async () => {
-      const { data } = await supabase.from('clients').select('id, full_name').order('full_name');
-      return data;
-    }
+    queryFn: () => clientsApi.list(),
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -263,27 +250,15 @@ function AddExpenseModal({ onSuccess }: { onSuccess: () => void }) {
     try {
       // 1. Upload proof
       const file = proofFiles[0];
-      const ext = file.name.split('.').pop();
-      const path = `expenses/${Date.now()}-${Math.random().toString(36).substring(2)}.${ext}`;
-      
-      const { error: uploadError } = await supabase.storage
-        .from('client-documents')
-        .upload(path, file);
-
-      if (uploadError) throw uploadError;
-
-      const { data: { publicUrl } } = supabase.storage.from('client-documents').getPublicUrl(path);
+      const { file_url } = await expensesApi.uploadProof(file);
 
       // 2. Insert expense
-      const { error } = await supabase.from('expenses').insert([{
+      await expensesApi.create({
         amount: parseFloat(amount),
         description,
-        client_id: clientId === 'none' ? null : clientId,
-        proof_url: publicUrl,
-        created_by: user?.id
-      }]);
-
-      if (error) throw error;
+        client_id: clientId === 'none' ? undefined : clientId,
+        proof_url: file_url,
+      });
 
       toast.success('Dépense enregistrée');
       setIsOpen(false);
@@ -300,11 +275,9 @@ function AddExpenseModal({ onSuccess }: { onSuccess: () => void }) {
 
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
-      <DialogTrigger asChild>
-        <Button className="bg-blue hover:bg-blue/90 rounded-xl">
-          <Plus className="mr-2 h-4 w-4" />
-          Nouvelle dépense
-        </Button>
+      <DialogTrigger render={<Button className="bg-blue hover:bg-blue/90 rounded-xl" />}>
+        <Plus className="mr-2 h-4 w-4" />
+        Nouvelle dépense
       </DialogTrigger>
       <DialogContent className="sm:max-w-md rounded-2xl">
         <DialogHeader>
@@ -313,27 +286,27 @@ function AddExpenseModal({ onSuccess }: { onSuccess: () => void }) {
         <form onSubmit={handleSubmit} className="space-y-4 py-4">
           <div className="space-y-2">
             <Label>Montant (TND) *</Label>
-            <Input 
-              type="number" 
-              step="0.001" 
-              value={amount} 
-              onChange={e => setAmount(e.target.value)} 
+            <Input
+              type="number"
+              step="0.001"
+              value={amount}
+              onChange={e => setAmount(e.target.value)}
               placeholder="0.000"
               className="rounded-xl"
             />
           </div>
           <div className="space-y-2">
             <Label>Description / Motif *</Label>
-            <Input 
-              value={description} 
-              onChange={e => setDescription(e.target.value)} 
-              placeholder="Ex: Frais de timbre, transport..." 
+            <Input
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              placeholder="Ex: Frais de timbre, transport..."
               className="rounded-xl"
             />
           </div>
           <div className="space-y-2">
             <Label>Lier à un client (Optionnel)</Label>
-            <Select value={clientId} onValueChange={setClientId}>
+            <Select value={clientId} onValueChange={(v) => v !== null && setClientId(v)}>
               <SelectTrigger className="rounded-xl">
                 <SelectValue placeholder="Choisir un client" />
               </SelectTrigger>

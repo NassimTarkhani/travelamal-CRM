@@ -1,40 +1,13 @@
 import React from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { dashboardApi } from '@/lib/api/client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { format, subMonths, startOfMonth, endOfMonth } from 'date-fns';
-import { fr } from 'date-fns/locale';
 
 export const PaymentsChart = () => {
   const { data, isLoading } = useQuery({
     queryKey: ['payments-chart'],
-    queryFn: async () => {
-      const months = Array.from({ length: 6 }, (_, i) => {
-        const date = subMonths(new Date(), 5 - i);
-        return {
-          month: format(date, 'MMM', { locale: fr }),
-          start: startOfMonth(date).toISOString(),
-          end: endOfMonth(date).toISOString(),
-        };
-      });
-
-      const results = await Promise.all(
-        months.map(async (m) => {
-          const { data } = await supabase
-            .from('payments')
-            .select('amount')
-            .gte('payment_date', m.start)
-            .lte('payment_date', m.end)
-            .eq('is_deleted', false);
-          
-          const total = data?.reduce((sum, p) => sum + Number(p.amount), 0) || 0;
-          return { name: m.month, total };
-        })
-      );
-
-      return results;
-    },
+    queryFn: () => dashboardApi.paymentsChart(),
   });
 
   return (
@@ -52,19 +25,19 @@ export const PaymentsChart = () => {
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={data}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                <XAxis 
-                  dataKey="name" 
-                  axisLine={false} 
-                  tickLine={false} 
-                  tick={{ fill: '#64748b', fontSize: 12 }} 
+                <XAxis
+                  dataKey="name"
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fill: '#64748b', fontSize: 12 }}
                 />
-                <YAxis 
-                  axisLine={false} 
-                  tickLine={false} 
+                <YAxis
+                  axisLine={false}
+                  tickLine={false}
                   tick={{ fill: '#64748b', fontSize: 12 }}
                   tickFormatter={(value) => `${value} TND`}
                 />
-                <Tooltip 
+                <Tooltip
                   cursor={{ fill: '#f8fafc' }}
                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                 />

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { clientsApi, paymentsApi } from '@/lib/api/client';
 import { usePermissions } from '@/hooks/usePermissions';
 import { formatCurrency } from '@/lib/utils/formatCurrency';
 import { getServiceStyles } from '@/lib/utils/serviceColors';
@@ -28,54 +28,17 @@ export default function PaymentsPage() {
 
   const { data: clients, isLoading: loadingClients, refetch: refetchClients } = useQuery({
     queryKey: ['payments-by-client'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('clients')
-        .select('*')
-        .order('amount_remaining', { ascending: false });
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => clientsApi.list(),
   });
 
   const { data: allPayments, isLoading: loadingPayments } = useQuery({
     queryKey: ['all-payments-history'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('payments')
-        .select(`
-          *,
-          client:clients(full_name),
-          recorder:profiles!recorded_by(name)
-        `)
-        .eq('is_deleted', false)
-        .order('payment_date', { ascending: false });
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => paymentsApi.list(),
   });
 
   const { data: employeeStats, isLoading: loadingStats } = useQuery({
     queryKey: ['payments-by-employee'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('payments')
-        .select('amount, recorded_by, profiles(name)')
-        .eq('is_deleted', false);
-
-      if (error) throw error;
-
-      const stats: Record<string, { name: string, count: number, total: number }> = {};
-      data?.forEach(p => {
-        const id = p.recorded_by || 'Unknown';
-        const name = (p.profiles as any)?.name || 'Inconnu';
-        if (!stats[id]) stats[id] = { name, count: 0, total: 0 };
-        stats[id].count += 1;
-        stats[id].total += Number(p.amount);
-      });
-
-      return Object.values(stats).sort((a, b) => b.total - a.total);
-    },
+    queryFn: () => paymentsApi.employeeStats(),
     enabled: isAdmin,
   });
 
@@ -86,19 +49,11 @@ export default function PaymentsPage() {
     try {
       const amountToPay = client.amount_remaining;
 
-      const { error: paymentError } = await supabase.from('payments').insert([{
+      await paymentsApi.create({
         client_id: client.id,
         amount: amountToPay,
-        method: 'Espèces', // Default
+        method: 'Espèces',
         payment_date: new Date().toISOString().split('T')[0],
-        recorded_by: (await supabase.auth.getUser()).data.user?.id,
-      }]);
-
-      if (paymentError) throw paymentError;
-
-      await supabase.rpc('increment_client_payment', {
-        p_client_id: client.id,
-        p_amount: amountToPay
       });
 
       toast.success('Paiement complété');

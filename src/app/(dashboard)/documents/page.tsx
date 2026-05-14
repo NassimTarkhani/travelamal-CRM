@@ -1,26 +1,26 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { documentsApi } from '@/lib/api/client';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
-import { 
-  FileText, 
-  Download, 
-  ExternalLink, 
+import {
+  FileText,
+  Download,
+  ExternalLink,
   Search,
   Filter,
   AlertCircle,
   CheckCircle2,
   Clock
 } from 'lucide-react';
-import { 
-  Table, 
-  TableBody, 
-  TableCell, 
-  TableHead, 
-  TableHeader, 
-  TableRow 
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow
 } from '@/components/ui/table';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -34,20 +34,10 @@ export default function DocumentsPage() {
 
   const { data: documents, isLoading } = useQuery({
     queryKey: ['all-documents'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('documents')
-        .select(`
-          *,
-          client:clients(id, full_name)
-        `)
-        .order('upload_date', { ascending: false });
-      if (error) throw error;
-      return data as any[];
-    },
+    queryFn: () => documentsApi.list(),
   });
 
-  const filteredDocs = documents?.filter(doc => 
+  const filteredDocs = documents?.filter(doc =>
     doc.file_name?.toLowerCase().includes(search.toLowerCase()) ||
     doc.client?.full_name?.toLowerCase().includes(search.toLowerCase()) ||
     doc.document_type?.toLowerCase().includes(search.toLowerCase())
@@ -65,8 +55,8 @@ export default function DocumentsPage() {
       <div className="flex flex-col space-y-4 md:flex-row md:items-center md:space-x-4 md:space-y-0">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-          <Input 
-            placeholder="Rechercher par fichier, type ou client..." 
+          <Input
+            placeholder="Rechercher par fichier, type ou client..."
             className="h-11 rounded-xl border-none bg-white pl-10 shadow-sm focus-visible:ring-blue"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -93,9 +83,9 @@ export default function DocumentsPage() {
                 {/* Preview Area */}
                 <div className="relative aspect-[4/3] w-full overflow-hidden bg-gray-50 border-b border-gray-50">
                   {doc.file_url && (doc.file_name?.toLowerCase().match(/\.(jpg|jpeg|png|webp|gif|svg)$/) || doc.document_type === 'Photo') ? (
-                    <img 
-                      src={doc.file_url} 
-                      alt={doc.file_name} 
+                    <img
+                      src={doc.file_url}
+                      alt={doc.file_name}
                       className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-110"
                     />
                   ) : (
@@ -104,7 +94,7 @@ export default function DocumentsPage() {
                       <span className="mt-2 text-[10px] font-bold uppercase tracking-widest">{doc.file_name?.split('.').pop()}</span>
                     </div>
                   )}
-                  
+
                   {/* Action Overlay */}
                   <div className="absolute inset-0 flex items-center justify-center bg-navy/40 opacity-0 transition-opacity group-hover:opacity-100">
                     <Button variant="secondary" size="icon" className="h-10 w-10 rounded-full shadow-lg" asChild>
@@ -127,7 +117,7 @@ export default function DocumentsPage() {
                   </div>
 
                   <div className="mt-4 flex flex-col space-y-3 pt-3 border-t border-gray-50">
-                    <div 
+                    <div
                       className="flex items-center space-x-2 cursor-pointer rounded-lg p-1 -ml-1 transition-colors hover:bg-gray-50"
                       onClick={() => navigate(`/clients/${doc.client?.id}`)}
                     >

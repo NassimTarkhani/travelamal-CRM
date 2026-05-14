@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { clientSchema, ClientFormData } from '@/lib/validations/clientSchema';
-import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { clientsApi, documentsApi, activitiesApi, profilesApi } from '@/lib/api/client';
 import { useAuthStore } from '@/stores/authStore';
 import { SERVICE_CONFIG } from '@/lib/utils/serviceColors';
 import { formatCurrency } from '@/lib/utils/formatCurrency';
@@ -43,20 +43,6 @@ const DOC_TYPE_MAP: Record<string, string> = {
   'Justificatif Paiement': 'Justificatif bancaire',
 };
 
-// Timeout wrapper used only for storage uploads.
-const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
-  let timeoutHandle: ReturnType<typeof setTimeout>;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => {
-      reject(new Error(`${label}: délai dépassé. Réessayez.`));
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    clearTimeout(timeoutHandle!);
-  }
-};
 
 const uploadDocumentsForClient = async (
   clientId: string,
@@ -70,118 +56,55 @@ const uploadDocumentsForClient = async (
   ticketReceiptFiles: File[],
   handwrittenReceiptFiles: File[],
   paymentProofFiles: File[],
-  uploadedBy: string | undefined
+  _uploadedBy: string | undefined
 ): Promise<string | null> => {
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-  const failedUploads: string[] = [];
-
-  const uploadFile = async (file: File, folder: string): Promise<string | null> => {
-    for (let attempt = 1; attempt <= 4; attempt++) {
-      const ext = (file.name.split('.').pop() || 'bin').toLowerCase();
-      const path = `${clientId}/${folder}/${crypto.randomUUID()}.${ext}`;
-
-      // Use withTimeout to avoid indefinite hangs from storage network issues
-      const uploadOp = supabase.storage
-        .from('client-documents')
-        .upload(path, file, { upsert: false, cacheControl: '3600' });
-
-      const { error } = await (async () => {
-        try {
-          return await withTimeout(uploadOp, 20000, `Storage upload ${folder}/${file.name}`);
-        } catch (e) {
-          // Convert timeout rejection into an object shape similar to supabase error for unified handling
-          return { error: { message: (e as Error).message } } as any;
-        }
-      })();
-
-      if (!error) {
-        const { data: { publicUrl } } = supabase.storage.from('client-documents').getPublicUrl(path);
-        return publicUrl;
-      }
-
-      if (attempt < 4) {
-        // Exponential backoff with jitter for transient storage/network failures.
-        const delay = Math.min(400 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250), 3000);
-        await sleep(delay);
-        continue;
-      }
-
-      console.error(`Storage upload failed [${folder}/${file.name}]:`, error.message);
-      failedUploads.push(`${folder}/${file.name}`);
-    }
-
-    return null;
-  };
-
-  // Flatten all files into one task list and upload all in parallel
-  const allTasks: Array<{ file: File; folder: string; labelType: string }> = [
-    ...cinFiles.map(f => ({ file: f, folder: 'cin', labelType: 'CIN' })),
-    ...passportFiles.map(f => ({ file: f, folder: 'passeport', labelType: 'Passeport' })),
-    ...diplomeFiles.map(f => ({ file: f, folder: 'diplome', labelType: 'Diplôme' })),
-    ...b3Files.map(f => ({ file: f, folder: 'b3', labelType: 'B3' })),
-    ...permisFiles.map(f => ({ file: f, folder: 'permis', labelType: 'Permis' })),
-    ...clientPhotoFiles.map(f => ({ file: f, folder: 'photo', labelType: 'Photo Client' })),
-    ...contratMunicipaliteFiles.map(f => ({ file: f, folder: 'contrat-municipalite', labelType: 'Contrat Municipalité' })),
-    ...ticketReceiptFiles.map(f => ({ file: f, folder: 'recu-ticket', labelType: 'Reçu Paiement Billet' })),
-    ...handwrittenReceiptFiles.map(f => ({ file: f, folder: 'recu-manuscrit', labelType: 'Reçu Manuscrit' })),
-    ...paymentProofFiles.map(f => ({ file: f, folder: 'preuve-paiement', labelType: 'Justificatif Paiement' })),
+  const allTasks: Array<{ file: File; labelType: string }> = [
+    ...cinFiles.map(f => ({ file: f, labelType: 'CIN' })),
+    ...passportFiles.map(f => ({ file: f, labelType: 'Passeport' })),
+    ...diplomeFiles.map(f => ({ file: f, labelType: 'Diplôme' })),
+    ...b3Files.map(f => ({ file: f, labelType: 'B3' })),
+    ...permisFiles.map(f => ({ file: f, labelType: 'Permis' })),
+    ...clientPhotoFiles.map(f => ({ file: f, labelType: 'Photo Client' })),
+    ...contratMunicipaliteFiles.map(f => ({ file: f, labelType: 'Contrat Municipalité' })),
+    ...ticketReceiptFiles.map(f => ({ file: f, labelType: 'Reçu Paiement Billet' })),
+    ...handwrittenReceiptFiles.map(f => ({ file: f, labelType: 'Reçu Manuscrit' })),
+    ...paymentProofFiles.map(f => ({ file: f, labelType: 'Justificatif Paiement' })),
   ];
 
   if (allTasks.length === 0) return null;
 
-  const results: Array<{
-    client_id: string;
-    document_type: string;
-    file_url: string;
-    file_name: string;
-    uploaded_by: string | undefined;
-    status: 'Présent';
-  } | null> = [];
+  const failedUploads: string[] = [];
 
   const CONCURRENCY = 3;
   for (let i = 0; i < allTasks.length; i += CONCURRENCY) {
     const batch = allTasks.slice(i, i + CONCURRENCY);
-    const batchResults = await Promise.all(
-      batch.map(async ({ file, folder, labelType }) => {
-        const url = await uploadFile(file, folder);
-        if (!url) return null;
-        return {
-          client_id: clientId,
-          document_type: DOC_TYPE_MAP[labelType] ?? 'Autre',
-          file_url: url,
-          file_name: `[${labelType}] ${file.name}`,
-          uploaded_by: uploadedBy,
-          status: 'Présent' as const,
-        };
+    await Promise.all(
+      batch.map(async ({ file, labelType }) => {
+        try {
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('client_id', clientId);
+          fd.append('document_type', DOC_TYPE_MAP[labelType] ?? 'Autre');
+          fd.append('file_name', `[${labelType}] ${file.name}`);
+          await documentsApi.upload(fd);
+        } catch (err) {
+          console.error(`Upload failed [${labelType}/${file.name}]:`, err);
+          failedUploads.push(`${labelType}/${file.name}`);
+        }
       })
     );
-    results.push(...batchResults);
-  }
-
-  const rows = results.filter((r): r is NonNullable<typeof r> => r !== null);
-  if (rows.length === 0) {
-    return failedUploads.length > 0
-      ? `Aucun document n'a pu être téléchargé (${failedUploads.length} échecs)`
-      : 'Aucun document n\'a pu être téléchargé';
-  }
-
-  const { error } = await supabase.from('documents').insert(rows);
-  if (error) {
-    console.error('Document DB insert error:', error.message);
-    return error.message;
   }
 
   if (failedUploads.length > 0) {
     return `${failedUploads.length} document(s) non téléchargé(s). Réessayez.`;
   }
-
   return null;
 };
 
 export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId }) => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user } = useAuthStore();
+  const { profile } = useAuthStore();
   const [cinFiles, setCinFiles] = useState<File[]>([]);
   const [passportFiles, setPassportFiles] = useState<File[]>([]);
   const [clientPhotoFiles, setClientPhotoFiles] = useState<File[]>([]);
@@ -279,10 +202,7 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
 
   const { data: employees } = useQuery({
     queryKey: ['employees-list'],
-    queryFn: async () => {
-      const { data } = await supabase.from('profiles').select('id, name, email');
-      return data;
-    },
+    queryFn: () => profilesApi.list(),
   });
 
   const totalAmount = watch('total_amount') || 0;
@@ -482,20 +402,18 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
           const pdfBlob = doc.output('blob');
 
           if (pdfBlob && pdfBlob.size > 500) {
-            const path = `generated-receipts/${clientId}/${Date.now()}.pdf`;
-            const { error: uploadError } = await supabase.storage.from('client-documents').upload(path, pdfBlob, { contentType: 'application/pdf' });
-            if (!uploadError) {
-              const { data: { publicUrl } } = supabase.storage.from('client-documents').getPublicUrl(path);
-              await supabase.from('documents').insert([{
-                client_id: clientId,
-                document_type: 'Autre',
-                file_name: `Reçu Système - ${new Date().toLocaleDateString('fr-FR')}`,
-                file_url: publicUrl,
-                uploaded_by: user?.id,
-                status: 'Présent'
-              }]);
+            try {
+              const pdfFile = new File([pdfBlob], `recuSysteme_${Date.now()}.pdf`, { type: 'application/pdf' });
+              const fd = new FormData();
+              fd.append('file', pdfFile);
+              fd.append('client_id', clientId);
+              fd.append('document_type', 'Autre');
+              fd.append('file_name', `Reçu Système - ${new Date().toLocaleDateString('fr-FR')}`);
+              await documentsApi.upload(fd);
               queryClient.invalidateQueries({ queryKey: ['client-documents', clientId] });
               toast.success("Copie archivée dans les documents de la DB");
+            } catch (uploadErr) {
+              console.error("Erreur archivage PDF:", uploadErr);
             }
           }
         }
@@ -528,7 +446,6 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
     if (ticketReceiptFiles.length > 0) sanitizedData.travel_alert_done = false;
 
     const payload = { ...sanitizedData, color_tag };
-    if (!clientId) (payload as any).created_by = user?.id;
 
     if (!clientId && contratMunicipaliteFiles.length === 0) {
       toast.error("Le contrat de municipalité est obligatoire.");
@@ -553,44 +470,26 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
 
       // 1. DB SAVE
       if (clientId) {
-        const { error } = await supabase
-          .from('clients')
-          .update(payload)
-          .eq('id', clientId);
-        if (error) {
-          toast.dismiss(savingToastId);
-          savingToastRef.current = undefined;
-          toast.error(`Erreur mise à jour: ${error.message}`);
-          return;
-        }
+        await clientsApi.update(clientId, payload);
         resolvedClientId = clientId;
       } else {
         if (!payload.folder_opening_date) {
           payload.folder_opening_date = new Date().toISOString().split('T')[0];
         }
-        const { data: inserted, error: createError } = await supabase
-          .from('clients')
-          .insert(payload)
-          .select('id')
-          .single();
-        if (createError) {
-          toast.dismiss(savingToastId);
-          savingToastRef.current = undefined;
-          toast.error(`Erreur création: ${createError.message}`);
-          return;
-        }
-        resolvedClientId = inserted?.id;
+        const created = await clientsApi.create(payload);
+        resolvedClientId = created?.id;
       }
 
       const cid = resolvedClientId;
 
       // 2. ACTIVITY + INVALIDATION (fire-and-forget)
-      supabase.from('activities').insert([{
-        client_id: cid,
-        action_type: clientId ? 'Modification' : 'Création',
-        description: `${clientId ? 'Dossier mis à jour' : 'Nouveau dossier créé'} par ${user?.email || 'admin'}`,
-        performed_by: user?.id,
-      }]).then(({ error }) => { if (error) console.error('Activity log:', error); });
+      if (cid) {
+        activitiesApi.create({
+          client_id: cid,
+          action_type: clientId ? 'Modification' : 'Création',
+          description: `${clientId ? 'Dossier mis à jour' : 'Nouveau dossier créé'} par ${profile?.name || 'admin'}`,
+        }).catch(err => console.error('Activity log:', err));
+      }
 
       queryClient.invalidateQueries({ queryKey: ['clients'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
@@ -611,7 +510,7 @@ export const ClientForm: React.FC<ClientFormProps> = ({ initialData, clientId })
       // 4. UPLOAD DOCUMENTS in background after navigation
       if (hasUploads && cid) {
         const uploadToastId = toast.loading('Téléchargement des documents...');
-        uploadDocumentsForClient(cid, ...uploadArgs, user?.id).then(uploadError => {
+        uploadDocumentsForClient(cid, ...uploadArgs, profile?.id).then(uploadError => {
           toast.dismiss(uploadToastId);
           if (uploadError) {
             toast.error(`Documents non enregistrés: ${uploadError}`);

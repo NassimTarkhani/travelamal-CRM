@@ -3,8 +3,7 @@ import { useDropzone } from 'react-dropzone';
 import { Upload, File, Trash2, Download, Clock, AlertCircle } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { supabase } from '@/lib/supabase/client';
-import { useAuthStore } from '@/stores/authStore';
+import { documentsApi, activitiesApi } from '@/lib/api/client';
 import { usePermissions } from '@/hooks/usePermissions';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
@@ -18,7 +17,6 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 export const DocumentsTab = ({ clientId }: { clientId: string }) => {
-  const { user } = useAuthStore();
   const { isAdmin } = usePermissions();
   const queryClient = useQueryClient();
   const [uploading, setUploading] = useState(false);
@@ -27,15 +25,7 @@ export const DocumentsTab = ({ clientId }: { clientId: string }) => {
 
   const { data: documents, isLoading } = useQuery({
     queryKey: ['documents', clientId],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('documents')
-        .select('*')
-        .eq('client_id', clientId)
-        .order('upload_date', { ascending: false });
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => documentsApi.listByClient(clientId),
   });
 
   const uploadMutation = useMutation({
@@ -43,47 +33,18 @@ export const DocumentsTab = ({ clientId }: { clientId: string }) => {
       setUploading(true);
 
       for (const file of files) {
-        // Unique naming with timestamp
-        const timestamp = new Date().getTime();
-        const fileExt = file.name.split('.').pop();
-        const safeName = file.name.replace(`.${fileExt}`, '').replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        const fileName = `${safeName}_${timestamp}.${fileExt}`;
-        const filePath = `${clientId}/${fileName}`;
-
         try {
-          // 1. Storage Upload
-          const { error: uploadError } = await supabase.storage
-            .from('client-documents')
-            .upload(filePath, file);
-
-          if (uploadError) throw uploadError;
-
-          // 2. Get Public URL
-          const { data: { publicUrl } } = supabase.storage
-            .from('client-documents')
-            .getPublicUrl(filePath);
-
-          // 3. Database Entry
-          const { error: dbError } = await supabase.from('documents').insert([{
-            client_id: clientId,
-            document_type: docType,
-            file_url: publicUrl,
-            file_name: file.name,
-            expiry_date: null,
-            uploaded_by: user?.id,
-            status: 'Présent',
-          }]);
-
-          if (dbError) throw dbError;
-
-          // 4. Activity Log
-          await supabase.from('activities').insert([{
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('client_id', clientId);
+          fd.append('document_type', docType);
+          fd.append('file_name', file.name);
+          await documentsApi.upload(fd);
+          activitiesApi.create({
             client_id: clientId,
             action_type: 'Document',
             description: `Document ajouté : ${docType} (${file.name})`,
-            performed_by: user?.id,
-          }]);
-
+          }).catch(err => console.error('Activity log:', err));
           toast.success(`${file.name} ajouté`);
         } catch (err: any) {
           toast.error(`Erreur pour ${file.name}: ${err.message}`);
@@ -116,13 +77,12 @@ export const DocumentsTab = ({ clientId }: { clientId: string }) => {
       old ? old.filter((doc) => doc.id !== id) : []
     );
 
-    const { error } = await supabase.from('documents').delete().eq('id', id);
-    if (error) {
-      // Rollback optimistic update on failure
-      queryClient.invalidateQueries({ queryKey: ['documents', clientId] });
-      toast.error(error.message);
-    } else {
+    try {
+      await documentsApi.delete(id);
       toast.success('Document supprimé');
+    } catch (err: any) {
+      queryClient.invalidateQueries({ queryKey: ['documents', clientId] });
+      toast.error(err.message || 'Erreur lors de la suppression');
     }
   };
 
@@ -144,7 +104,7 @@ export const DocumentsTab = ({ clientId }: { clientId: string }) => {
               <div className="max-w-md">
                 <div className="space-y-1.5">
                   <Label className="text-xs font-semibold text-gray-500">Nature du document</Label>
-                  <Select value={docType} onValueChange={setDocType}>
+                  <Select value={docType} onValueChange={(v) => v !== null && setDocType(v)}>
                     <SelectTrigger className="h-10 rounded-xl border-gray-100 bg-gray-50/50 focus:ring-blue/20">
                       <SelectValue />
                     </SelectTrigger>
@@ -233,10 +193,13 @@ export const DocumentsTab = ({ clientId }: { clientId: string }) => {
                     {/* Action Overlay */}
                     <div className="absolute inset-0 flex items-center justify-center bg-navy/40 opacity-0 transition-opacity group-hover:opacity-100">
                       <div className="flex space-x-2">
-                        <Button variant="secondary" size="icon" className="h-9 w-9 rounded-full shadow-lg" asChild>
-                          <a href={doc.file_url} target="_blank" rel="noopener noreferrer">
-                            <Download className="h-4 w-4" />
-                          </a>
+                        <Button
+                          variant="secondary"
+                          size="icon"
+                          className="h-9 w-9 rounded-full shadow-lg"
+                          render={<a href={doc.file_url ?? undefined} target="_blank" rel="noopener noreferrer" />}
+                        >
+                          <Download className="h-4 w-4" />
                         </Button>
                         {isAdmin && (
                           <Button

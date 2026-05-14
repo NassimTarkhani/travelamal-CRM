@@ -7,7 +7,7 @@ interface AuthGuardProps {
 }
 
 export const AuthGuard: React.FC<AuthGuardProps> = ({ children }) => {
-  const { user, loading, initialize } = useAuthStore();
+  const { profile, loading, initialize } = useAuthStore();
 
   useEffect(() => {
     initialize();
@@ -21,7 +21,7 @@ export const AuthGuard: React.FC<AuthGuardProps> = ({ children }) => {
     );
   }
 
-  if (!user) {
+  if (!profile) {
     return <Navigate to="/login" replace />;
   }
 

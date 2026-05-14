@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { activitiesApi, profilesApi } from '@/lib/api/client';
 import { formatDistanceToNow, startOfToday, subDays, isAfter, isBefore, startOfYesterday } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import {
@@ -30,22 +30,11 @@ export default function ActivityPage() {
 
   const { data: activities, isLoading } = useQuery({
     queryKey: ['all-activities', filters],
-    queryFn: async () => {
-      let query = supabase
-        .from('activities')
-        .select(`
-          *,
-          performer:profiles!performed_by(name),
-          client:clients(full_name, sequential_number)
-        `)
-        .order('action_date', { ascending: false });
-
-      if (filters.employee !== 'all') query = query.eq('performed_by', filters.employee);
-      if (filters.type !== 'all') query = query.eq('action_type', filters.type);
-      
-      const { data, error } = await query.limit(100);
-      if (error) throw error;
-      return data;
+    queryFn: () => {
+      const params: Record<string, string> = {};
+      if (filters.employee !== 'all') params.performed_by = filters.employee;
+      if (filters.type !== 'all') params.action_type = filters.type;
+      return activitiesApi.list(params);
     },
     staleTime: 0,
     refetchOnWindowFocus: true,
@@ -53,30 +42,26 @@ export default function ActivityPage() {
 
   const { data: employees } = useQuery({
     queryKey: ['employees-list'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('profiles').select('id, name');
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => profilesApi.list(),
     staleTime: 60000,
   });
 
   const filteredActivities = React.useMemo(() => {
     if (!activities) return [];
     return activities.filter(activity => {
-      const matchesSearch = activity.description?.toLowerCase().includes(filters.search.toLowerCase()) || 
-                           (activity.client as any)?.full_name?.toLowerCase().includes(filters.search.toLowerCase());
-      
+      const matchesSearch = activity.description?.toLowerCase().includes(filters.search.toLowerCase()) ||
+        (activity.client as any)?.full_name?.toLowerCase().includes(filters.search.toLowerCase());
+
       // Date filtering
       let matchesDate = true;
       if (filters.date !== 'all') {
         const actionDate = new Date(activity.action_date!);
         if (filters.date === 'today') {
-           matchesDate = isAfter(actionDate, startOfToday());
+          matchesDate = isAfter(actionDate, startOfToday());
         } else if (filters.date === 'yesterday') {
-           matchesDate = isAfter(actionDate, startOfYesterday()) && isBefore(actionDate, startOfToday());
+          matchesDate = isAfter(actionDate, startOfYesterday()) && isBefore(actionDate, startOfToday());
         } else if (filters.date === 'week') {
-           matchesDate = isAfter(actionDate, subDays(new Date(), 7));
+          matchesDate = isAfter(actionDate, subDays(new Date(), 7));
         }
       }
 
@@ -125,10 +110,10 @@ export default function ActivityPage() {
           <label className="absolute -top-2 left-3 bg-white px-1 text-[10px] font-bold text-gray-400 uppercase tracking-tighter transition-colors group-focus-within:text-blue">
             Employé
           </label>
-          <select 
+          <select
             className="w-full rounded-xl border-gray-100 bg-white px-4 py-3 text-sm font-semibold shadow-sm focus:border-blue focus:ring-blue transition-all"
             value={filters.employee}
-            onChange={(e) => setFilters({...filters, employee: e.target.value})}
+            onChange={(e) => setFilters({ ...filters, employee: e.target.value })}
           >
             <option value="all">Tous les employés</option>
             {employees?.map(emp => (
@@ -141,10 +126,10 @@ export default function ActivityPage() {
           <label className="absolute -top-2 left-3 bg-white px-1 text-[10px] font-bold text-gray-400 uppercase tracking-tighter transition-colors group-focus-within:text-blue">
             Type d'Action
           </label>
-          <select 
+          <select
             className="w-full rounded-xl border-gray-100 bg-white px-4 py-3 text-sm font-semibold shadow-sm focus:border-blue focus:ring-blue"
             value={filters.type}
-            onChange={(e) => setFilters({...filters, type: e.target.value})}
+            onChange={(e) => setFilters({ ...filters, type: e.target.value })}
           >
             <option value="all">Toutes les actions</option>
             <option value="Création">Création</option>
@@ -158,10 +143,10 @@ export default function ActivityPage() {
           <label className="absolute -top-2 left-3 bg-white px-1 text-[10px] font-bold text-gray-400 uppercase tracking-tighter transition-colors group-focus-within:text-blue">
             Période
           </label>
-          <select 
+          <select
             className="w-full rounded-xl border-gray-100 bg-white px-4 py-3 text-sm font-semibold shadow-sm focus:border-blue focus:ring-blue"
             value={filters.date}
-            onChange={(e) => setFilters({...filters, date: e.target.value})}
+            onChange={(e) => setFilters({ ...filters, date: e.target.value })}
           >
             <option value="all">Tout l'historique</option>
             <option value="today">Aujourd'hui</option>
@@ -176,12 +161,12 @@ export default function ActivityPage() {
           </label>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-            <input 
+            <input
               type="text"
               placeholder="Client ou description..."
               className="w-full rounded-xl border-gray-100 bg-white pl-10 pr-4 py-3 text-sm font-semibold shadow-sm focus:border-blue focus:ring-blue"
               value={filters.search}
-              onChange={(e) => setFilters({...filters, search: e.target.value})}
+              onChange={(e) => setFilters({ ...filters, search: e.target.value })}
             />
           </div>
         </div>

@@ -1,7 +1,7 @@
 import React from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
-import { format, addDays, isAfter, isBefore } from 'date-fns';
+import { alertsApi } from '@/lib/api/client';
+import { format, addDays, isBefore } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import { AlertTriangle, CheckCircle2, User, Phone, Calendar, ArrowRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -19,24 +19,12 @@ export default function AlertsPage() {
 
   const { data: expiringClients, isLoading } = useQuery({
     queryKey: ['expiring-documents'],
-    queryFn: async () => {
-      // Fetch clients with expiring docs or imminent travel
-      const { data, error } = await supabase
-        .from('clients')
-        .select('id, full_name, phone_primary, passport_expiry, b3_expiry, travel_date, passport_alert_done, b3_alert_done, travel_alert_done')
-        .or(`and(passport_expiry.lte.${format(alertThreshold,'yyyy-MM-dd')},passport_alert_done.eq.false),and(b3_expiry.lte.${format(alertThreshold,'yyyy-MM-dd')},b3_alert_done.eq.false),and(travel_date.lte.${format(addDays(today, 7),'yyyy-MM-dd')},travel_alert_done.eq.false)`)
-        .order('passport_expiry', { ascending: true });
-
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => alertsApi.list(),
   });
 
   const markDoneMutation = useMutation({
     mutationFn: async ({ id, type, done }: { id: string; type: 'passport' | 'b3' | 'travel'; done: boolean }) => {
-      const field = type === 'passport' ? 'passport_alert_done' : type === 'b3' ? 'b3_alert_done' : 'travel_alert_done';
-      const { error } = await supabase.from('clients').update({ [field]: done }).eq('id', id);
-      if (error) throw error;
+      await alertsApi.markDone(id, type, done);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['expiring-documents'] });
@@ -142,15 +130,15 @@ export default function AlertsPage() {
                 <div className="flex items-center justify-between">
                   <Badge variant="outline" className={cn(
                     "rounded-full px-3 py-0.5 text-[10px] font-bold uppercase tracking-wider",
-                    alert.daysLeft < 0 ? "bg-red text-white border-red" : 
-                    alert.daysLeft < 15 ? "bg-orange-500 text-white border-orange-500" :
-                    "bg-gold text-white border-gold"
+                    alert.daysLeft < 0 ? "bg-red text-white border-red" :
+                      alert.daysLeft < 15 ? "bg-orange-500 text-white border-orange-500" :
+                        "bg-gold text-white border-gold"
                   )}>
                     {alert.daysLeft < 0 ? 'Expiré' : `Expire dans ${alert.daysLeft} jours`}
                   </Badge>
                   <div className="flex items-center space-x-2">
                     <span className="text-[10px] font-bold text-gray-400 uppercase">Traité</span>
-                    <Checkbox 
+                    <Checkbox
                       onCheckedChange={(checked) => markDoneMutation.mutate({ id: alert.clientId, type: alert.type, done: !!checked })}
                     />
                   </div>

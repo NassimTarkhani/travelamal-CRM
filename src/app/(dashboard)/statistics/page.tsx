@@ -12,7 +12,7 @@ import {
   Legend
 } from 'recharts';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { dashboardApi } from '@/lib/api/client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { formatCurrency } from '@/lib/utils/formatCurrency';
 import { Users, CreditCard, TrendingUp, Wallet, Calendar, Filter, Download } from 'lucide-react';
@@ -48,24 +48,13 @@ export default function StatisticsPage() {
   const { data: stats, isLoading } = useQuery({
     queryKey: ['admin-stats', timeFilter],
     queryFn: async () => {
-      // 1. Fetch Clients
-      const { data: clients, error: clientsError } = await supabase
-        .from('clients')
-        .select('service, total_amount, amount_paid, created_at');
-      if (clientsError) throw clientsError;
-
-      // 2. Fetch Payments (for collected amounts, filtered by payment_date)
-      const { data: payments, error: paymentsError } = await supabase
-        .from('payments')
-        .select('amount, payment_date, created_at')
-        .or('is_deleted.is.null,is_deleted.eq.false');
-      if (paymentsError) throw paymentsError;
-
-      // 3. Fetch Expenses
-      const { data: expenses, error: expensesError } = await supabase
-        .from('expenses')
-        .select('amount, created_at');
-      if (expensesError) throw expensesError;
+      // Fetch all raw data from server
+      const raw = await dashboardApi.statistics();
+      const { clients, payments, expenses } = raw as {
+        clients: { service: string; total_amount: number; amount_paid: number; created_at: string }[];
+        payments: { amount: number; payment_date: string | null; created_at: string }[];
+        expenses: { amount: number; created_at: string }[];
+      };
 
       const now = new Date();
       let start: Date | null = null;

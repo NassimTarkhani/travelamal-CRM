@@ -3,8 +3,7 @@ import { useForm, SubmitHandler } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { toast } from 'sonner';
-import { supabase } from '@/lib/supabase/client';
-import { useAuthStore } from '@/stores/authStore';
+import { paymentsApi, documentsApi, activitiesApi } from '@/lib/api/client';
 import { usePermissions } from '@/hooks/usePermissions';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 
@@ -37,7 +36,6 @@ interface AddPaymentModalProps {
 }
 
 export const AddPaymentModal: React.FC<AddPaymentModalProps> = ({ isOpen, onClose, clientId, onSuccess }) => {
-  const { user } = useAuthStore();
   const { isAdmin } = usePermissions();
   const [loading, setLoading] = useState(false);
   const [proofFiles, setProofFiles] = useState<File[]>([]);
@@ -58,56 +56,32 @@ export const AddPaymentModal: React.FC<AddPaymentModalProps> = ({ isOpen, onClos
       toast.error("Veuillez joindre une preuve de paiement (obligatoire).");
       return;
     }
-    
+
     setLoading(true);
     try {
-      const { error: paymentError } = await supabase.from('payments').insert([{
+      await paymentsApi.create({
         client_id: clientId,
         amount: data.amount,
         payment_date: data.payment_date,
         method: data.method,
-        recorded_by: user?.id,
-      }]);
-
-      if (paymentError) throw paymentError;
+      });
 
       // Upload proof document if provided
       if (proofFiles.length > 0) {
-        const file = proofFiles[0];
-        const ext = file.name.split('.').pop() || 'bin';
-        const path = `${clientId}/paiement-preuve/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-        const { error: uploadError } = await supabase.storage
-          .from('client-documents')
-          .upload(path, file, { upsert: false });
-        if (!uploadError) {
-          const { data: { publicUrl } } = supabase.storage.from('client-documents').getPublicUrl(path);
-          await supabase.from('documents').insert([{
-            client_id: clientId,
-            document_type: 'Justificatif bancaire',
-            file_url: publicUrl,
-            file_name: file.name,
-            uploaded_by: user?.id,
-          }]);
-        } else {
-          console.error('Proof upload error:', uploadError.message);
-        }
+        const fd = new FormData();
+        fd.append('file', proofFiles[0]);
+        fd.append('client_id', clientId);
+        fd.append('document_type', 'Justificatif bancaire');
+        fd.append('file_name', proofFiles[0].name);
+        await documentsApi.upload(fd).catch(err => console.error('Proof upload error:', err));
       }
 
-      // Update client amount_paid
-      const { error: rpcError } = await supabase.rpc('increment_client_payment', {
-        p_client_id: clientId,
-        p_amount: data.amount
-      });
-
-      if (rpcError) throw rpcError;
-
       // Log activity
-      await supabase.from('activities').insert([{
+      await activitiesApi.create({
         client_id: clientId,
         action_type: 'Paiement',
         description: `Nouveau versement de ${data.amount} TND (${data.method})`,
-        performed_by: user?.id,
-      }]);
+      });
 
       toast.success('Paiement enregistré avec succès');
       reset();

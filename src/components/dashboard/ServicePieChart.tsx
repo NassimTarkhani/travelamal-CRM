@@ -1,28 +1,14 @@
 import React from 'react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { dashboardApi } from '@/lib/api/client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { SERVICE_CONFIG } from '@/lib/utils/serviceColors';
 
 export const ServicePieChart = () => {
   const { data, isLoading } = useQuery({
     queryKey: ['service-pie-chart'],
-    queryFn: async () => {
-      const { data: clients } = await supabase.from('clients').select('service');
-      
-      const counts: Record<string, number> = {};
-      clients?.forEach(c => {
-        const s = c.service || 'Autres';
-        counts[s] = (counts[s] || 0) + 1;
-      });
-
-      return Object.entries(counts).map(([name, value]) => ({
-        name,
-        value,
-        color: SERVICE_CONFIG[name as keyof typeof SERVICE_CONFIG]?.color || '#6B7280'
-      }));
-    },
+    queryFn: () => dashboardApi.servicesChart(),
   });
 
   return (
@@ -52,7 +38,7 @@ export const ServicePieChart = () => {
                     <Cell key={`cell-${index}`} fill={entry.color} />
                   ))}
                 </Pie>
-                <Tooltip 
+                <Tooltip
                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                 />
                 <Legend iconType="circle" />

@@ -33,7 +33,7 @@ const DashboardLayout = ({ children }: { children: React.ReactNode }) => (
 );
 
 const HomeRoute = () => {
-  const { loading, user } = useAuthStore();
+  const { loading, profile } = useAuthStore();
   const { isAdmin } = usePermissions();
 
   if (loading) {
@@ -44,14 +44,14 @@ const HomeRoute = () => {
     );
   }
 
-  if (!user) return <Navigate to="/login" replace />;
+  if (!profile) return <Navigate to="/login" replace />;
 
   if (isAdmin) return <DashboardPage />;
   return <Navigate to="/clients" replace />;
 };
 
 const AdminRoute = ({ children }: { children: React.ReactNode }) => {
-  const { loading, user } = useAuthStore();
+  const { loading, profile } = useAuthStore();
   const { isAdmin } = usePermissions();
 
   if (loading) {
@@ -62,7 +62,7 @@ const AdminRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
 
-  if (!user) return <Navigate to="/login" replace />;
+  if (!profile) return <Navigate to="/login" replace />;
 
   if (!isAdmin) return <Navigate to="/clients" replace />;
   return <>{children}</>;

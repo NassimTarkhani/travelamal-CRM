@@ -3,7 +3,7 @@ import { Search, Filter, X } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { profilesApi } from '@/lib/api/client';
 
 interface ClientFiltersProps {
   filters: any;
@@ -15,10 +15,7 @@ export const ClientFilters: React.FC<ClientFiltersProps> = ({ filters, setFilter
   const [debounceTimer, setDebounceTimer] = useState<number | null>(null);
   const { data: employees } = useQuery({
     queryKey: ['employees-list'],
-    queryFn: async () => {
-      const { data } = await supabase.from('profiles').select('id, name, email');
-      return data;
-    },
+    queryFn: () => profilesApi.list(),
   });
 
   return (

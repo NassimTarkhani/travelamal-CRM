@@ -1,6 +1,6 @@
 import React from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { activitiesApi } from '@/lib/api/client';
 import { formatDistanceToNow, format } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import {
@@ -17,15 +17,7 @@ import { cn } from '@/lib/utils';
 export const ActivityTab = ({ clientId }: { clientId: string }) => {
   const { data: activities, isLoading } = useQuery({
     queryKey: ['client-activities', clientId],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('activities')
-        .select('*, performer:profiles!activities_performed_by_fkey(name)')
-        .eq('client_id', clientId)
-        .order('action_date', { ascending: false });
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => activitiesApi.listByClient(clientId),
   });
 
   const getIcon = (type: string) => {

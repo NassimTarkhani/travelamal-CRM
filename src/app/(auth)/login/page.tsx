@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Eye, EyeOff, Lock, Mail } from 'lucide-react';
 import { toast } from 'sonner';
-import { isSupabaseConfigured, supabase } from '@/lib/supabase/client';
+import { useAuthStore } from '@/stores/authStore';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -17,28 +17,16 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [remember, setRemember] = useState(false);
   const navigate = useNavigate();
+  const signIn = useAuthStore((s) => s.signIn);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      if (!isSupabaseConfigured) {
-        throw new Error('Supabase non configure. Ajoutez VITE_SUPABASE_URL et VITE_SUPABASE_ANON_KEY dans votre fichier .env');
-      }
-
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (error) throw error;
-      if (!data.user) throw new Error('Aucun utilisateur retourne par Supabase');
-
+      await signIn(email, password);
       toast.success('Connexion réussie');
-      // Let auth store resolve profile and role after session is established.
       navigate('/', { replace: true });
-
     } catch (error: any) {
       toast.error(error.message || 'Identifiants invalides');
     } finally {

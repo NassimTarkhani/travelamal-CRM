@@ -1,6 +1,6 @@
 import React from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { profilesApi, authApi } from '@/lib/api/client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -15,35 +15,19 @@ export default function SettingsPage() {
 
   const { data: users, isLoading, refetch } = useQuery({
     queryKey: ['users-list'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .order('name');
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => profilesApi.list(),
   });
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      // In a real app, this would use admin.inviteUserByEmail for security
-      // For local demo, we use signUp
-      const { data, error: signUpError } = await supabase.auth.signUp({
+      await authApi.register({
         email: newUser.email,
         password: newUser.password,
-        options: {
-          data: {
-            name: newUser.name,
-            role: newUser.role
-          }
-        }
+        name: newUser.name,
+        role: newUser.role,
       });
-
-      if (signUpError) throw signUpError;
-
-      toast.success('Invitation envoyée à ' + newUser.email);
+      toast.success('Utilisateur créé : ' + newUser.email);
       setIsAddUserOpen(false);
       refetch();
     } catch (error: any) {
@@ -58,7 +42,7 @@ export default function SettingsPage() {
           <h1 className="font-serif text-3xl font-bold text-navy">Paramètres Système</h1>
           <p className="text-sm text-gray-500">Gestion de l'équipe et des accès</p>
         </div>
-        <Button 
+        <Button
           className="bg-blue hover:bg-blue/90 rounded-xl"
           onClick={() => setIsAddUserOpen(true)}
         >

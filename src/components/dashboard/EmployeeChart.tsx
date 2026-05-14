@@ -1,28 +1,13 @@
 import React from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase/client';
+import { dashboardApi } from '@/lib/api/client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 export const EmployeeChart = () => {
   const { data, isLoading } = useQuery({
     queryKey: ['employee-chart'],
-    queryFn: async () => {
-      const { data: payments } = await supabase
-        .from('payments')
-        .select('amount, recorded_by, profiles(name)')
-        .eq('is_deleted', false);
-      
-      const counts: Record<string, { name: string, total: number }> = {};
-      payments?.forEach(p => {
-        const id = p.recorded_by || 'Unknown';
-        const name = (p.profiles as any)?.name || 'Inconnu';
-        if (!counts[id]) counts[id] = { name, total: 0 };
-        counts[id].total += Number(p.amount);
-      });
-
-      return Object.values(counts).sort((a, b) => b.total - a.total).slice(0, 5);
-    },
+    queryFn: () => dashboardApi.employeesChart(),
   });
 
   return (
@@ -41,15 +26,15 @@ export const EmployeeChart = () => {
               <BarChart data={data} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
                 <XAxis type="number" hide />
-                <YAxis 
-                  dataKey="name" 
-                  type="category" 
-                  axisLine={false} 
-                  tickLine={false} 
+                <YAxis
+                  dataKey="name"
+                  type="category"
+                  axisLine={false}
+                  tickLine={false}
                   tick={{ fill: '#1e293b', fontSize: 11, fontWeight: 500 }}
                   width={80}
                 />
-                <Tooltip 
+                <Tooltip
                   cursor={{ fill: '#f8fafc' }}
                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                   formatter={(value) => [`${value} TND`, 'Collecté']}

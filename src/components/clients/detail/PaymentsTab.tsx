@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import { Plus, CreditCard, Trash2, Calendar, User, Receipt } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { supabase } from '@/lib/supabase/client';
-import { useAuthStore } from '@/stores/authStore';
+import { paymentsApi } from '@/lib/api/client';
 import { usePermissions } from '@/hooks/usePermissions';
 import { formatCurrency } from '@/lib/utils/formatCurrency';
 import { format } from 'date-fns';
@@ -23,34 +22,14 @@ export const PaymentsTab = ({ client, onUpdate }: { client: any, onUpdate: () =>
 
   const { data: payments, isLoading } = useQuery({
     queryKey: ['client-payments', client.id],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('payments')
-        .select('*, profiles(name)')
-        .eq('client_id', client.id)
-        .eq('is_deleted', false)
-        .order('payment_date', { ascending: false });
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => paymentsApi.listByClient(client.id),
   });
 
   const deletePayment = async (payment: any) => {
     if (!confirm('Voulez-vous vraiment supprimer ce paiement ?')) return;
 
     try {
-      const { error } = await supabase
-        .from('payments')
-        .update({ is_deleted: true })
-        .eq('id', payment.id);
-
-      if (error) throw error;
-
-      // Update client amount_paid
-      await supabase.rpc('increment_client_payment', {
-        p_client_id: client.id,
-        p_amount: -Number(payment.amount)
-      });
+      await paymentsApi.softDelete(payment.id);
 
       queryClient.invalidateQueries({ queryKey: ['client-payments', client.id] });
       onUpdate();
@@ -82,7 +61,7 @@ export const PaymentsTab = ({ client, onUpdate }: { client: any, onUpdate: () =>
       doc.text(`Montant: ${fmtPDF(payment.amount)}`, 20, 46);
       doc.text(`Date: ${format(new Date(payment.payment_date), 'dd/MM/yyyy')}`, 20, 56);
       doc.text(`Méthode: ${payment.method}`, 20, 66);
-      doc.text(`Enregistré par: ${(payment.profiles as any)?.name || ''}`, 20, 76);
+      doc.text(`Enregistré par: ${(payment as any).recorder?.name || (payment as any).profiles?.name || ''}`, 20, 76);
       const safeName = (client.full_name || client.id).replace(/[^a-z0-9]/gi, '_');
       doc.save(`recu_${safeName}_${payment.id}.pdf`);
       toast.success('Reçu généré');
@@ -179,7 +158,7 @@ export const PaymentsTab = ({ client, onUpdate }: { client: any, onUpdate: () =>
                   <td className="px-6 py-4">
                     <div className="flex items-center space-x-2">
                       <User className="h-4 w-4 text-gray-400" />
-                      <span className="text-xs text-gray-500">{(payment.profiles as any)?.name}</span>
+                      <span className="text-xs text-gray-500">{(payment as any).recorder?.name || (payment as any).profiles?.name}</span>
                     </div>
                   </td>
                   <td className="px-6 py-4 text-right">
